@@ -1,0 +1,400 @@
+---
+title: "COVID_Survey_DataExploration"
+author: "Adam Chapnik"
+date: "12/9/2020"
+output: html_document
+---
+
+After having done some initial visualizations and crosstabs of the data, it seems like giving no response to demographic information, or giving bad answers, is actually useful information. I will create a variable for the number of useless answers they have given to personal questions, along with cleaning the data.
+
+## Clean data
+
+```{r include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(MASS)
+library(tigerstats)
+library(Amelia)
+library(pscl)
+library(broom)
+library(generalhoslem)
+library(pROC)
+library(glmulti)
+library(rtweet)
+library(ROCR)
+library(caTools) 
+library(caret)
+df <- read_csv("COVID_Survey.csv")
+health <- read_csv("Health_Frailty.csv")
+vehicles <- read_csv("Vehicles.csv")
+
+# rename columns
+df <- df %>% dplyr::rename(ID = "Household Member: Contact ID")
+df <- df %>% dplyr::rename(Campus = "Household Member: Campus")
+df <- df %>% dplyr::rename(Response = "Covid19 Testing Consent")
+df <- df %>% dplyr::rename(Age = "Household Member: Age")
+df <- df %>% dplyr::rename(Lang = "Household Member: Primary Language")
+df <- df %>% dplyr::rename(Birthplace = "Household Member: Country Of Birth")
+df <- df %>% dplyr::rename(Gender = "Household Member: Gender")
+df <- df %>% dplyr::rename(Marital = "Household Member: Marital Status")
+df <- df %>% dplyr::rename(Race = "Household Member: Race")
+df <- df %>% dplyr::rename(Latino = "Household Member: Ethnicity")
+df <- df %>% dplyr::rename(Employed = "Household Member: Employment Status")
+df <- df %>% dplyr::rename(Apt = "Household Member: Apartment")
+df <- df %>% dplyr::rename(Income = "Household Member: Estimated Annual Gross Income")
+health <- health %>% dplyr::rename(Frailty = "Total ADLs Resident Finds Difficult")
+health <- health %>% dplyr::rename(Health = "Health Self Rate")
+health <- health %>% dplyr::rename(ID = "Household Member ID")
+health$`Household Member: Apartment` <- NULL 
+health$`Household Member: Campus` <- NULL
+health <- health[!duplicated(health$ID),]
+vehicles <- vehicles %>% dplyr::rename(ID = "Household Member ID")
+vehicles <- vehicles %>% dplyr::rename(Vehicle = "Current Transportation Methods")
+vehicles$`Household Member: Apartment` <- NULL 
+vehicles$`Household Member: Campus` <- NULL
+vehicles$X5 <- NULL
+
+# merge dfs
+df <- left_join(df, health, by = "ID")
+df <- left_join(df, vehicles, by = "ID")
+
+# count NAs per row (exclude Response column)
+subset <- df %>% dplyr::select(Age, Lang, Birthplace, Gender, Marital, Race, Latino, Employed, Frailty, Health, Vehicle)
+df$na_count <- apply(subset, 1, function(x) sum(is.na(x)))
+
+# replace "Response" NAs
+Response <- replace_na(df$Response, "No")
+df$Response <- NULL
+df <- cbind(Response, df)
+
+# replace "Birthplace" NAs
+x <- data.frame(c("Mandarin", "Russian", "Other", "Korean", "Cantonese", "Farsi", "English", "Spanish"), c("China", "Former Soviet Union", NA, "Korea", "China", "Iran", NA, NA)) # df of Lang and Birthplace association
+x <- x %>% dplyr::rename(Lang = "c..Mandarin....Russian....Other....Korean....Cantonese....Farsi...", Birthplace = "c..China....Former.Soviet.Union...NA...Korea....China....Iran...")
+no.birth <- df[is.na(df$Birthplace),] # get Birthplace NAs
+no.birth$Birthplace <- NULL
+test <- left_join(no.birth, x, by = "Lang") # merge dfs
+df <- rbind(df[!is.na(df$Birthplace),], test) ## most "birthplace" NAs are english and spanish speakers
+
+# recode Response (No/Yes = 0/1)
+df$Response <- as.factor(df$Response)
+ifelse(df$Response == "No", 0, ifelse(df$Response == "Yes", 1, ifelse(is.na(df$Response), 98, 99)))
+df$response <- ifelse(df$Response == "No", 0, ifelse(df$Response == "Yes", 1, ifelse(is.na(df$Response), 98, 99)))
+df$response <- as.factor(df$response)
+
+# drop Encounter Date and ID
+df$`Encounter Date` <- NULL
+df$`ID` <- NULL
+
+# recode marital status by living with someone or alone ("Living")
+df$Marital <- as.factor(df$Marital)
+df$Living <- ifelse(df$Marital %in% c("Divorced", "Single", "Widowed", "Separated/Living Apart"), 1, ifelse(df$Marital %in% c("Domestic Partnership", "Married"), 2, ifelse(is.na(df$Marital), 98, 99)))
+
+# recode employment status by Works/Doesn't ("Working")
+df$Employed <- as.factor(df$Employed)
+df$Working <- ifelse(df$Employed %in% c("Retired (not employed in the last month and not actively seeking work)"), 1, ifelse(df$Employed %in% c("Employed", "Unemployed (not employed in the last month and actively seeking work)"), 2, ifelse(is.na(df$Employed), 98, 99)))
+
+# recode health (Health_Fctr)
+df$Health <- as.factor(df$Health)
+df$Health_Fctr <- ifelse(is.na(df$Health), 98, ifelse(df$Health == "Excellent", 1, ifelse(df$Health == "Very Good", 2, ifelse(df$Health == "Good", 3, ifelse(df$Health == "Fair", 4, ifelse(df$Health == "Poor", 5, 99))))))
+
+# recode Vehicle by Yes/No (Drives)
+df$Vehicle <- as.factor(df$Vehicle)
+df$Drives <- ifelse(is.na(df$Vehicle), 0, ifelse(df$Vehicle == "Personal Vehicle", 1, 99))
+
+# convert variables to factors
+df$Campus <- as.factor(df$Campus)
+df$Lang <- as.factor(df$Lang)
+df$Birthplace <- as.factor(df$Birthplace)
+df$Campus <- as.factor(df$Campus)
+df$Gender <- as.factor(df$Gender)
+df$Race <- as.factor(df$Race)
+df$Latino <- as.factor(df$Latino)
+df$Living <- as.factor(df$Living)
+df$Working <- as.factor(df$Working)
+df$Health_Fctr <- as.factor(df$Health_Fctr)
+df$Drives <- as.factor(df$Drives)
+
+## count bad answers
+# vector of bad answers
+test <- function(x, var){
+  if(var[x] == 99){ # excludes NAs
+    return(1)
+  }else{
+    return(0) # includes NAs
+  }
+}
+a <- sapply(c(1:nrow(df)), test, var = df$Living)
+b <- sapply(c(1:nrow(df)), test, var = df$Working)
+
+# vector of bad answers
+test <- function(x, var){
+  if(grepl("Prefer", var[x]) == TRUE){ 
+    return(1)
+  }else{ 
+    if(grepl("Know", var[x]) == TRUE){
+      return(1)
+    }else{ 
+    return(0) # includes NAs
+    }
+  }
+}
+c <- sapply(c(1:nrow(df)), test, var = df$Birthplace)
+d <- sapply(c(1:nrow(df)), test, var = df$Latino)
+e <- sapply(c(1:nrow(df)), test, var = df$Race)
+f <- sapply(c(1:nrow(df)), test, var = df$Gender)
+g <- sapply(c(1:nrow(df)), test, var = df$Health)
+
+test <- function(x, var){
+  if(is.na(var[x])){
+    return(0)
+  }else{
+    if(var[x] < 1){
+    return(1)
+  }else{
+    return(0) # includes NAs
+    }
+  }
+}
+h <- sapply(c(1:nrow(df)), test, var = df$Age)
+i <- sapply(c(1:nrow(df)), test, var = df$Income)
+
+df$unknowns <- a + b + c + d + e + f + g + h + i 
+
+# variable for same response as partner(s) T/F/NA ("same") #
+# 1 = T, 0 = F, 99 = live alone #
+check_same_2 <- function(x, y){ # x is a subset of the df ("a" in same_check); y is a vector ("b")
+  
+  if (sum(y) == 3) {
+      
+      same <- c(1, 1, 1)
+      result <- cbind(x, same)
+      return(result)
+    
+  }else{
+ 
+    if (sum(y) == 6) {
+      
+      same <- c(1, 1, 1)
+      result <- cbind(x, same)
+      return(result)
+      
+    }else{
+      
+      same <- c(0, 0, 0)
+      result <- cbind(x, same)
+      return(result)
+      
+    }
+  }
+}
+same_check <- function(x){
+  
+  a <- filter(df, Apt == unique(df$Apt)[x])
+  
+  b <- a %>% pull(response)
+  b <- as.integer(b)
+  
+  if (length(b) == 1) {
+    
+    same <- 99
+    result <- cbind(a, same)
+    return(result)
+    
+  }else{
+    
+    if (length(b) == 3) {
+        
+        result <- check_same_2(a, b)
+        return(result)
+    
+    }else{
+    
+      if (sum(b) == 3) {
+      
+        same <- c(0, 0)
+        result <- cbind(a, same)
+        return(result)
+      
+      }else{
+      
+       same <- c(1, 1)
+       result <- cbind(a, same)
+       return(result)
+    }
+   }
+  }
+}
+test <- lapply(1:length(unique(df$Apt)), same_check)
+df <- rtweet::do_call_rbind(test)
+df$same <- as.factor(df$same)
+
+# replace missing "Age", "Frailty", "Income" with average
+df$Age[is.na(df$Age)] <- mean(df$Age,na.rm=T)
+df$Frailty[is.na(df$Frailty)] <- df$Frailty %>% mean(na.rm=T)
+df$Income[is.na(df$Income)] <- df$Income %>% mean(na.rm=T)
+
+# remove redundant variables
+df$Vehicle <- NULL
+df$Marital <- NULL
+df$Employed <- NULL
+df$Health <- NULL
+
+# remove insignificant variables
+df$Race <- NULL
+df$Latino <- NULL
+df$Gender <- NULL
+df$Apt <- NULL
+```
+
+```{r}
+sapply(df, function(x) sum(is.na(x))) # total missing values per var
+sapply(df, function(x) length(unique(x))) # total unique values per var
+```
+
+
+```{r}
+missmap(df, main = "Missing values vs observed")
+```
+
+## Visualization
+
+```{r}
+#crosstabs: unknowns
+mytable <- xtabs(~Response+unknowns, data=df)
+rowPerc(xtabs(~unknowns, data=df))
+rowPerc(mytable) 
+colPerc(mytable) 
+```
+
+10% of NOs have at least one piece of unknown information. 13.11% of YESs have at least one pieace of missing information. There is a slight correlation between having an unknown piece of information and response.
+
+```{r}
+#crosstabs: na_count
+mytable <- xtabs(~Response+na_count, data=df)
+rowPerc(xtabs(~na_count, data=df))
+rowPerc(mytable) 
+colPerc(mytable) 
+```
+
+90.13% of NOs are missing at least one piece of information, with most of them (77.59%) missing only one. On the other hand, 88.32% of YESs are missing at least one piece of information. This is a pretty weak correlation, but it does exist.
+
+```{r}
+#crosstabs: Campus
+mytable <- xtabs(~Response+Campus, data=df)
+rowPerc(xtabs(~Campus, data=df))
+rowPerc(mytable) # largest NOs are Russian, Cantonese, Mandarin, then English
+colPerc(mytable) 
+```
+
+Campus seems to actually be an important factor in responses. This is probably because responses are clustered by campus, since having neighbors saying YES makes one more likely to say YES.
+
+```{r}
+#crosstabs: Working
+mytable <- xtabs(~Response+Working, data=df)
+rowPerc(xtabs(~Working, data=df))
+rowPerc(mytable) # largest NOs are Russian, Cantonese, Mandarin, then English
+colPerc(mytable) 
+```
+
+
+```{r}
+# crosstabs: Language
+mytable <- xtabs(~Response+Lang, data=df)
+rowPerc(xtabs(~Lang, data=df))
+rowPerc(mytable) # largest NOs are Russian, Cantonese, Mandarin, then English
+colPerc(mytable) 
+```
+
+41.86% of residents speak Russian, 21.98% speak English, 17.38% speak Cantonese, 13.95% speak Mandarin, and the other 4.83% speak other languages. Of NOs, 45.33% Russian, 22.52% Cantonese, 14.02% English, 12.89% Mandarin, and the other 5.24% speak other languages. Of YESs, 37.61% Russian, 31.72% English, 15.25% Mandarin, 11.09% Cantonese, and other 4.33% speak other languages. Of Russian speakers, 60-40 No-Yes; of English speakers, 35-65 No-Yes; of Cantonese speakers, 51-49 No-Yes; of Mandarin speakers, 51-49 No-Yes.
+
+```{r}
+# crosstabs: Birthplace
+mytable <- xtabs(~Response + Birthplace, data=df)
+rowPerc(xtabs(~ Birthplace, data=df))
+rowPerc(mytable) # largest NOs are USSR, China, then US
+colPerc(mytable)
+```
+
+40.36% of residents were born in USSR, 32.16% in China, 20.3% in US. Of NOs, 43.69% Russian, 36.45% Chinese, 12.48% American. Of YESs, 36.28% Russian, 26.91% Chinese, 29.86% American. Of Russians, 59.5-40.5 No-Yes; of Chinese, 62-38 No-Yes; of American, 34-66 No-Yes. 
+
+So far, it seems like those born in the Former Soviet Union or China, or whose primary language is Russian or Chinese, being the two largest groups, also tend to say No over Yes; whereas American born/English speakers, the third largest group, tend to say Yes over No.
+
+
+```{r}
+# crosstabs: Living
+mytable <- xtabs(~Response + Living, data=df)
+rowPerc(xtabs(~ Living, data=df)) # 56-43 living alone-together
+rowPerc(mytable) # of NOs, 56-43 living alone-together; of YESs, 56-43 living alone-together
+colPerc(mytable) # of alone, 55-45 No-Yes; of together, 55-45 No-Yes
+```
+56.2% of residents live alone and 42.26% live with someone (0.55% unknown). Of NOs and of YESs, almost identical distribution of living alone versus with someone (~56-43 alone-together). Of those living alone versus togeher, there is also a nearly identical distribution of residents saying NO versus YES (55-45). Living situation therefore actually does not seem to be an important factor in the response.
+
+```{r}
+# crosstabs: Drives
+mytable <- xtabs(~Response + Drives, data=df)
+rowPerc(xtabs(~ Drives, data=df)) # 12% drive
+rowPerc(mytable) 
+colPerc(mytable) # driving associated with YES
+```
+
+```{r}
+# crosstabs: same
+mytable <- xtabs(~Response + same, data=df)
+rowPerc(xtabs(~ same, data=df))
+rowPerc(mytable) 
+colPerc(mytable)
+```
+
+```{r}
+# crosstabs: Health_Fctr
+mytable <- xtabs(~Response + Health_Fctr, data=df)
+rowPerc(xtabs(~ Health_Fctr, data=df))
+rowPerc(mytable) 
+colPerc(mytable)
+```
+
+```{r}
+df %>% ggplot(aes(y = Age, x = as.factor(Response))) + geom_violin()
+```
+
+Although the age distributions are similar, it looks like the youngest residents (below 50) tend to say YES.
+
+```{r}
+df %>% dplyr::select(Age, Response, Birthplace) %>% remove_missing() %>% ggplot(aes(y = Age, x = as.factor(Response))) + geom_boxplot() + facet_wrap(~ Birthplace)
+
+df %>% dplyr::select(Age, Response, Lang) %>% remove_missing() %>% ggplot(aes(y = Age, x = as.factor(Response))) + geom_boxplot() + facet_wrap(~ Lang)
+```
+
+For almost every group, being younger looks like it is associated with saying No.
+
+
+```{r}
+df %>% dplyr::select(Age, Response, Gender) %>% remove_missing() %>% ggplot(aes(y = Age, x = as.factor(Response))) + geom_boxplot() + facet_wrap(~ Gender)
+```
+
+Younger men seem slightly more likely to say no than younger women, but the difference is small.
+
+```{r}
+df %>% ggplot(aes(y = Income, x = as.factor(Response))) + geom_violin()
+```
+
+```{r}
+df %>% ggplot(aes(y = Frailty, x = as.factor(Response))) + geom_violin()
+```
+
+Some other visualizations (none of these variables seem to be that significant): 
+
+```{r}
+df %>% dplyr::select(Age, Response, Living) %>% remove_missing() %>% ggplot(aes(y = Age, x = as.factor(Response))) + geom_boxplot() + facet_wrap(~ Living)
+
+df %>% dplyr::select(Age, Response, Race) %>% remove_missing() %>% ggplot(aes(y = Age, x = as.factor(Response))) + geom_boxplot() + facet_wrap(~ Race)
+
+df %>% dplyr::select(Age, Response, Latino) %>% remove_missing() %>% ggplot(aes(y = Age, x = as.factor(Response))) + geom_boxplot() + facet_wrap(~ Latino)
+
+df %>% dplyr::select(Age, Response, Working) %>% remove_missing() %>% ggplot(aes(y = Age, x = as.factor(Response))) + geom_violin() + facet_wrap(~ Working)
+```
+
+The strongest variables seem to be: Age, same, Health_Fctr, Drives, Birthplace, na_count, unknowns, Income, Working, followed by Living. Also worth checking Frailty. Importantly, Apt, Lang, Gender, Race, Latino, all seem insignificant.
+
+

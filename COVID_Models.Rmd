@@ -1,0 +1,3761 @@
+---
+title: "COVID_Models"
+author: "Adam Chapnik"
+date: "12/27/2020"
+output: html_document
+---
+
+## Model ##
+
+Observations in the dataset are likely not independent. The campus on which a resident lives likely influences their response. Although a mixed effect model would work in this scenario, there are only five campuses (levels), and it's likely that a parsimonious model would have different significant variables on different campuses. Therefore, I will use a multiple logistic regression model for each campus.
+
+Although the room in which a resident lives would also violate independence of observations, I will be treating whether a resident has the same answer the one(s) they live with as a variable instead of a level.
+
+The goal of this project is to have a list of the most significant predictors of a resident's response at each particular campus, listed in descending order of how much of an effect those predictors have on a response of NO. This requires finding the best logit models for predicting response at each campus (best discrimination and calibration). It's okay if there is multicollinearity since the models will only be applied to the residents in the dataset. In order to achieve the best models, I will use glmulti with some specifications. I will only split the dataset into a testing a training set for Brighton because the dataset is especially large.
+
+```{r}
+library(rtweet)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(MASS)
+library(tigerstats)
+library(Amelia)
+library(pscl)
+library(broom)
+library(generalhoslem)
+library(pROC)
+library(glmulti)
+library(rtweet)
+library(ROCR)
+library(caTools) 
+library(caret)
+```
+
+# Brighton
+
+```{r}
+# filter dataset by campus #
+campus_filter <- function(campus){ # name of campus
+  
+  loc <- filter(df, Campus == campus)
+  loc$Campus <- NULL
+  loc$response <- NULL
+  loc <- remove_missing(loc) # only 8 rows of Brighton
+  
+  values <- as.matrix(sapply(loc, function(x) length(unique(x))))
+  
+  if (values[1,1] == 1) { # if ALL Response are YESs or NOs
+    
+    print("Unanimous Response")
+    
+  }else{
+    
+    if (sum(values[,1] == 1) >= 1) { # if any vars have only one unique value
+      
+      delete <- rownames(values)[values[,1] == 1] # list of homogeneous vars
+      x <- colnames(loc)[!colnames(loc) %in% c(delete)] # remove vars from list of vars
+      loc %>% dplyr::select(x)
+      
+    }else{
+      
+      return(loc)
+      
+    }
+  }
+}
+```
+
+Because of the size of this dataset I will try to improve it with a test a train split.
+
+```{r}
+library(caTools)
+set.seed(529)
+split <- sample.split(Brighton$Response, SplitRatio = 0.75) # 75% in train set
+BrightonTrain <- subset(Brighton, split == TRUE)
+BrightonTest <- subset(Brighton, split == FALSE)
+```
+
+Next I will look at the model given by bestglm.
+
+```{r}
+# reformat data
+BrightonTrain <- within(BrightonTrain, { # y must be last var
+    y <- Response         # into y
+    Response  <- NULL        # Delete 
+})
+
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(bestglm)
+
+ # find the model with the best AIC
+bestAIC = bestglm(BrightonTrain, family = binomial, IC = "AIC")
+ 
+# Show top 5 models
+bestAIC$BestModels
+ 
+# show a summary of the best model
+summary(bestAIC$BestModel)
+# show the relationship between the number of predictors and the model quality
+plot(seq_len(nrow(bestAIC$Subsets)) - 1, bestAIC$Subsets[,"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+ 
+# show again, but cap it at 4 predictors
+plot(seq_len(5) - 1, bestAIC$Subsets[seq_len(5),"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+
+# show again, but cap it at 10 predictors
+plot(seq_len(11) - 1, bestAIC$Subsets[seq_len(11),"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+```
+
+Lang and same are in every model while Age, Birthplace, Living, Working, Living, and Drives are in none. The best model using bestglm uses Lang, Health_Fctr, and same with an AIC = 851.97. AIC is lowest with only 3 terms. (Using BIC, the best model has only an intercept). Notably, bestglm does not consider interaction terms.
+
+Next I will look at the models given by glmulti.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Brighton <- campus_filter("Brighton")
+set.seed(529)
+split <- sample.split(Brighton$Response, SplitRatio = 0.75) # 75% in train set
+BrightonTrain <- subset(Brighton, split == TRUE)
+
+# replicate the analysis done by bestglm using AIC
+bestAIC2 = glmulti(Response ~ ., data = BrightonTrain, family = binomial, level = 1, crit=aic, fitfunc=glm, method="h",
+confsetsize = 256, plotty = F, report = F)
+ 
+print(bestAIC2)
+bestAIC2@formulas[1:5]
+bestAIC2@objects[[5]]
+```
+
+Using BIC, glmulti would say the model with only an intercept is the best. This isn't true, so I will use AIC. The best model it gives has an AIC of 851.97 with the predictors Lang, Health_Fctr, and same. Again, glmulti does not consider interactions. The next best model (AIC = 853.3) added the predictor na_count. The next best (AIC = 853.7) added Income instead to the first model. The next best (AIC = 853.8) was tied: one added Frailty to the first model, the other substituted Frailty for Health_Fctr. 
+
+Next I will test glmulti allowing it to look for interaction terms, but for the sake of time I will limit the variables under consideration to the top six found by the GBM, although I removed Birthplace because it wasn't in any of the top previous models, and including it took extra time to run. The dataset is the same.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Brighton <- campus_filter("Brighton")
+set.seed(529)
+split <- sample.split(Brighton$Response, SplitRatio = 0.75) # 75% in train set
+BrightonTrain <- subset(Brighton, split == TRUE)
+
+# allow for 2-way interactions
+bestAIC3 = glmulti(Response ~ Age + Lang + Income + Health_Fctr + same, data = BrightonTrain, family = binomial, level = 2, crit=aic, fitfunc=glm, method="g", confsetsize = 256, plotty = F, report = F)
+
+print(bestAIC3)
+bestAIC3@formulas[1:5]
+bestAIC3@objects[[5]]
+```
+
+Using BIC, glmulti would say the model with only an intercept is the best. Using AIC and limiting the predictors considered to the top ones found by the GBM minus Birthplace, the best model has an AIC of 844.55 (better than before) with predictor Income and interactions btwn Lang and Income, Health_Fctr and Income, and same and Income. The second best model (AIC = 845.6) has the addition interaction between Income and Age. Slightly worse (AIC = 846) is a model that substitutes Health_Fctr for the interaction between Health_Fctr and Income in the first model. Slightly worse (AIC = 846.4) is a model that adds Age to the first model. Slightly worse (AIC = 846.8) is a model that adds Age to the second model. 
+
+There are many limitations to glmulti, so I will use these following techniques to see if it's possible to improve on automatic model selection.
+
+First off, since I keep running into separation with the models. There doesn't seem to be a reason for perfect separation, so I will try to prevent it.
+
+```{r}
+# expand a dot formula to show all of the terms
+expandDotFormula = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+ # allow for dot-style formula
+ if (gsub("()", "", f[3], fixed=TRUE) == ".")
+ {
+ nm = names(dat)
+ nm = nm[nm != target]
+ fAdj = formula(paste(target, " ~ ", paste(nm, collapse=" + "), sep=""))
+ }
+ return (fAdj)
+}
+ 
+# test whether a specific term in a formula will cause separation
+termHasSeparation = function(target, predictor, dat)
+{
+ cols = unlist(strsplit(predictor, ":"))
+ isFactor = sapply(cols, function(x) class(dat[,x]) == "character" || class(dat[,x]) == "factor")
+ if (sum(isFactor) == 0) {
+   return (FALSE)
+ }else{ # check whether there are cells in which there are all zeroes
+   fff <- formula(paste(" ~ ", target, " + ", paste(cols[isFactor], collapse=" + "), sep = ""))
+   if (sum(xtabs(fff, data = dat) == 0) > 0) {
+     return (TRUE)
+   }else{ # check whether there are cells in which there are all ones
+     if (sum(xtabs(fff, data = dat) == 1) > 0) {
+       return (TRUE)
+     }else{ # check whether there are cells with no exposure
+       nPossibleCells = prod(sapply(cols[isFactor], function(x) length(unique(dat[,x]))))
+       nActualCells = prod(dim(xtabs(fff, data = dat)))
+       if (nActualCells < nPossibleCells) {
+         return (TRUE)
+       }else{
+         return (FALSE)
+       }
+     }
+   }
+ }
+}
+# test whether a formula will cause separation
+fHasSeparation = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+  
+ ff <- expandDotFormula(f, dat)
+ tt <- terms(ff)
+ ttf <- attr(tt, "factors")
+  
+ # ttf has columns that represent individual terms of the formula
+ fTerms <- colnames(ttf)
+ # check each term whether it exhibits separation
+ reject <- any(sapply(fTerms, function(x) termHasSeparation(target, x, dat)))
+  
+ return (reject)
+}
+ 
+# this function returns a NULL model if the formula causes separation
+noSeparationGLM = function(f, data){
+  
+ if (fHasSeparation(f, data)) {
+    target = gsub("()", "", f[2], fixed=TRUE)
+    a = formula(paste(target, " ~ 1", sep=""))
+    return (glm(a, data = data, family = binomial(link=logit)))
+ }else{
+   
+ return (glm(f, data = data, family = binomial(link=logit)))
+   
+ }
+}
+```
+
+```{r} 
+# test some formulae
+fHasSeparation(Response ~ 1, BrightonTrain)
+fHasSeparation(Response ~ 1 + Lang + Health_Fctr + same, BrightonTrain)
+fHasSeparation(Response ~ 1 + Income + Lang:Income + Health_Fctr:Income + same:Income, BrightonTrain)
+ 
+# test some GLMs
+noSeparationGLM(Response ~ 1, BrightonTrain)
+noSeparationGLM(Response ~ 1 + Lang + Health_Fctr + same, BrightonTrain)
+noSeparationGLM(Response ~ 1 + Income + Lang:Income + Health_Fctr:Income + same:Income, BrightonTrain)
+```
+
+Most of the models considered so far have separation.
+
+Here are the variables and interactions that cause separation.
+
+```{r}
+# list the columns that cause separation
+names(BrightonTrain[,-1])[sapply(names(BrightonTrain[,-1]), function(x) termHasSeparation("Response", x, BrightonTrain))]
+ 
+# list the pairs of columns that cause separation
+colPairs = expand.grid(names(BrightonTrain[,-1]), names(BrightonTrain[,-1]))
+colPairs = colPairs[apply(colPairs, 1, function(x) x[1] != x[2]),]
+combinations = apply(colPairs, 1, function(x) paste(x, collapse=":"))
+combinations[sapply(combinations, function(x) termHasSeparation("Response", x, BrightonTrain))]
+```
+
+I will now try to use glmulti but reject models that have separation.
+
+```{r}
+# fit a GLM allowing that possible models will be rejected due to separation
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+
+# read the training data
+Brighton <- campus_filter("Brighton")
+set.seed(529)
+split <- sample.split(Brighton$Response, SplitRatio = 0.75) # 75% in train set
+BrightonTrain <- subset(Brighton, split == TRUE)
+ 
+glms = glmulti(Response ~ ., data = BrightonTrain, level = 1, method="g", fitfunc = noSeparationGLM, confsetsize = 256, plotty = F, report = F)
+ 
+# show the result - note the absence of columns that cause separation
+ 
+summary(glms)$bestmodel
+print(glms)
+
+glms@objects[[5]]
+```
+
+This results is a model with Working, Health_Fctr, and same as predictors and an AIC of 858.15. This is without considering interactions. The next best model (AIC = 858.2) replaces Health_Fctr with Frailty. The next best model (AIC = 858.3) removes Working from the first model. The next best model (AIC = 858.5) adds na_count to the second best model. The fifth best model (AIC = 858.3) only uses Working and same.
+
+I will try to do this again but also consider interactions, by using custom genetic algorithms.
+
+```{r}
+# a function to create GLM formulae from an indicator vector
+createFormula = function(indicators)
+{
+ # do the special case of no predictor columns, so use NULL model
+ if (sum(indicators) == 0)
+ return (formula(paste(target, " ~ 1", sep="")))
+  
+ # the more common case
+ return (formula(paste(target, " ~ ", paste(predictors[indicators == 1], collapse = " + "))))
+}
+
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(memoise)
+ 
+# read the training data
+Brighton <- campus_filter("Brighton")
+set.seed(529)
+split <- sample.split(Brighton$Response, SplitRatio = 0.75) # 75% in train set
+BrightonTrain <- subset(Brighton, split == TRUE)
+
+# the function to be optimised
+glmScore = function(indicators)
+{
+ # return a NULL model if any errors or warnings occur
+ glm.mod = tryCatch (
+ glm(createFormula(indicators), data = BrightonTrain, family = binomial(link=logit)),
+ error = function(e) glm(createFormula(indicators * 0), data = BrightonTrain, family = binomial(link=logit)),
+ warning = function(w) glm(createFormula(indicators * 0), data = BrightonTrain, family = binomial(link=logit))
+ )
+ # if there are problems with NA parameters (e.g. via separation), then use a NULL model
+ if (any(is.na(coef(glm.mod))))
+ glm.mod = glm(createFormula(indicators * 0), data = BrightonTrain, family = binomial(link=logit))
+ print(glm.mod$formula)
+ return(AIC(glm.mod))
+}
+ 
+glmScr = memoise(glmScore)
+
+# a vector of names of predictor columns
+target = "Response"
+predictors = names(BrightonTrain)
+predictors = predictors[predictors != target]
+indices = expand.grid(seq_len(length(predictors)), seq_len(length(predictors)))
+indices = indices[indices[,1] != indices[,2],]
+twoWays = apply(indices, 1, function(x) paste(predictors[x], collapse = ":"))
+predictors = c(predictors, twoWays)
+length(predictors)
+```
+
+There are 121 possible predictors, so 2^121 possible formulae.
+
+```{r}
+# custom function to create an initial population
+initPopn = function (object, ...) 
+{
+ population = matrix(0, nrow = object@popSize, ncol = object@nBits)
+ n = ncol(BrightonTrain) - 1
+ probability = min(1, 2 / n)
+ ones = matrix(rbinom(n * object@popSize, 1, probability), object@popSize, n)
+ population[,seq_len(n)] = ones
+ return(population)
+}
+ 
+set.seed(1)
+ 
+ga.mod.2 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors), population = initPopn, popSize = 100, parallel = TRUE, run = 5)
+```
+
+```{r}
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.2@solution)], collapse=" + "))
+test <- glm(x, BrightonTrain, family = "binomial"); summary(test)
+```
+
+The best model this gives uses the terms Lang, Health_Fctr, Drives, and same, with an AIC of 853.94. This is better than what was found by glmulti.
+
+Now I will do this one more time and also consider interactions.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(memoise, caret, GA)
+ 
+# function to show a formula as text
+f2text = function(f)
+{
+ if (class(f) != "formula")
+ stop("f is not a formula!")
+ return(paste(as.character(f)[c(2,1,3)], sep = "", collapse = " "))
+}
+ 
+# read the training data
+Brighton <- campus_filter("Brighton")
+set.seed(529)
+split <- sample.split(Brighton$Response, SplitRatio = 0.75) # 75% in train set
+BrightonTrain <- subset(Brighton, split == TRUE)
+ 
+# a vector of names of predictor columns
+target = "Response"
+predictors = names(BrightonTrain)
+predictors = predictors[predictors != target]
+indices = expand.grid(seq_len(length(predictors)), seq_len(length(predictors)))
+indices = indices[indices[,1] < indices[,2],]
+twoWays = apply(indices, 1, function(x) paste(predictors[x], collapse = ":"))
+predictors = c(predictors, twoWays)
+length(predictors)
+ 
+# a function to create GLM formulae from an indicator vector
+createFormula = function(indicators)
+{
+ if (is.null(indicators))
+ stop("createFormula: indicators is NULL!")
+ if (any(is.na(indicators)))
+ stop("createFormula: NA found in indicators!")
+ # do the special case of no predictor columns, so use NULL model
+ if (sum(indicators) == 0)
+ return (formula(paste(target, " ~ 1", sep="")))
+  
+ # the more common case
+ result = formula(paste(target, " ~ ", paste(predictors[indicators == 1], collapse = " + ")))
+ return (result)
+}
+ 
+# the function to be optimised
+glmScore = function(indicators)
+{
+ if (is.null(indicators))
+ stop("glmScore: indicators is NULL!")
+ if (any(is.na(indicators)))
+ {
+ if (colin_verbose)
+ print("glmScore: NA found in indicators!")
+ }
+ 
+ # return a NULL model if any errors or warnings occur
+ fff = createFormula(indicators)
+ useMod = FALSE
+ glm.mod = NULL
+ tryCatch (
+ {
+ glm.mod = glm(fff, data = BrightonTrain, family = binomial(link=logit));
+ useMod = TRUE;
+ }
+ ,
+ error = function(e) {
+ if (colin_verbose)
+ {
+ print(f2text(fff));
+ print(e);
+ }
+ },
+ warning = function(w) {
+ if (colin_verbose)
+ {
+ print(f2text(fff));
+ print(w);
+ }
+ }
+ )
+ if (! useMod) 
+ {
+ return (9e99)
+ }
+ # if there are problems with NA parameters (e.g. via separation), then use a NULL model
+ if (any(is.na(coef(glm.mod))))
+ {
+ if (colin_verbose)
+ print("NAs in coefficients")
+ return (9e99)
+ }
+ result = AIC(glm.mod)
+ return(result)
+}
+ 
+# create a version of GLM score that remembers previous results
+glmScr = memoise(glmScore)
+ 
+# define a glm fitness function
+glmFitness = function(x) return(-1 * glmScr(x))
+ 
+# custom function to create an initial population
+initPopn = function (object, ...) 
+{
+ population = matrix(0, nrow = object@popSize, ncol = object@nBits)
+ n = ncol(BrightonTrain) - 1
+ probability = min(1, 2 / n)
+ ones = matrix(rbinom(n*object@popSize, 1, probability), object@popSize, n)
+ population[,seq_len(n)] = ones
+ # make the first n rows be the nth predictor
+ n2 = min(n, object@popSize)
+for (i in seq_len(n2)) {
+ population[i,] <- rep(0, times = object@nBits)
+ population[i, i] <- 1
+}
+ return(population)
+}
+ 
+# custom function to monitor the genetic algorithm
+glmMonitor = function (object, digits = getOption("digits"), ...) 
+{
+ fitness <- na.exclude(object@fitness)
+ i = which.max(fitness[! is.na(object@fitness)])
+ p = object@population[! is.na(object@fitness),]
+ x = p[i,]
+ cat(paste("Iter =", object@iter, " | Median =", 
+ format(-1 * median(fitness), digits = 0), 
+ " | Best =", 
+ format(-1 * max(fitness), digits = 0), 
+ f2text(createFormula(x)),
+ "\n"))
+}
+ 
+# run a genetic algorithm to find the "best" GLM with interaction terms
+forget(glmScr)
+colin_verbose = FALSE
+ga.mod.3 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors), 
+ population = initPopn, 
+ popSize = 500, 
+ parallel = TRUE, 
+ run = 25, 
+ monitor = glmMonitor, 
+ seed = 1)
+# run two more times to make sure randomness didn't limit the models considered
+ga.mod.4 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors),
+population = initPopn,
+popSize = 500,
+parallel = TRUE,
+run = 25,
+monitor = glmMonitor,
+seed = 2)
+ga.mod.5 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors),
+population = initPopn,
+popSize = 500,
+parallel = TRUE,
+run = 25,
+monitor = glmMonitor,
+seed = 3)
+```
+
+Now I will check which result was best.
+
+```{r}
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.3@solution[1,])], collapse=" + "))
+test1 <- glm(x, BrightonTrain, family = "binomial"); summary(test1)
+
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.4@solution[1,])], collapse=" + "))
+test2 <- glm(x, BrightonTrain, family = "binomial"); summary(test2)
+
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.5@solution[1,])], collapse=" + "))
+test3 <- glm(x, BrightonTrain, family = "binomial"); summary(test3)
+```
+
+The third result was best. Using the genetic algorithm we have a model using na_count and interactions between Age and Lang, na_count and Age, and na_count and Health_Fctr, Age and same, and na_count and same, with an AIC = 845.95. The first result is second best (AIC = 847.89), with terms na_count, same, and interaction between Age and Lang, na_count and Age, and na_count and Health_Fctr, and na_count and same. The second result has AIC = 851.93, using Lang, Health_Fctr, same, and interaction between same and na_count. Notably there is no separation or collinearity in these models.
+
+Let's look at a basic comparison of ALL the models (not just the best of each trial).
+
+```{r}
+# reformat models as glm
+x <- paste("Response" ,"~", paste0(names(bestAIC$BestModel$model)[-1], collapse=" + "))
+test1 <- glm(x, BrightonTrain, family = "binomial")
+test2 <- glm(bestAIC2@objects[[1]]$formula, BrightonTrain, family = "binomial")
+test3 <- glm(bestAIC2@objects[[2]]$formula, BrightonTrain, family = "binomial")
+test4 <- glm(bestAIC2@objects[[3]]$formula, BrightonTrain, family = "binomial")
+test5 <- glm(bestAIC2@objects[[4]]$formula, BrightonTrain, family = "binomial")
+test6 <- glm(bestAIC2@objects[[5]]$formula, BrightonTrain, family = "binomial")
+test7 <- glm(glms@objects[[1]]$formula, BrightonTrain, family = "binomial")
+test8 <- glm(glms@objects[[2]]$formula, BrightonTrain, family = "binomial")
+test9 <- glm(glms@objects[[3]]$formula, BrightonTrain, family = "binomial")
+test10 <- glm(glms@objects[[4]]$formula, BrightonTrain, family = "binomial")
+test11 <- glm(glms@objects[[5]]$formula, BrightonTrain, family = "binomial")
+test12 <- glm(bestAIC3@objects[[1]], BrightonTrain, family = "binomial")
+test13 <- glm(bestAIC3@objects[[2]], BrightonTrain, family = "binomial")
+test14 <- glm(bestAIC3@objects[[3]], BrightonTrain, family = "binomial")
+test15 <- glm(bestAIC3@objects[[4]], BrightonTrain, family = "binomial")
+test16 <- glm(bestAIC3@objects[[5]], BrightonTrain, family = "binomial")
+test17 <- test
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.5@solution[1,])], collapse=" + "))
+test18 <- glm(x, BrightonTrain, family = "binomial")
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.3@solution[1,])], collapse=" + "))
+test19 <- glm(x, BrightonTrain, family = "binomial")
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.4@solution[1,])], collapse=" + "))
+test20 <- glm(x, BrightonTrain, family = "binomial")
+```
+
+I will now look at the accuracy of the models using an ROC curve and choosing the best threshold.
+
+```{r}
+# baseline accuracy
+rowPerc(table(Brighton$Response))
+nrow(Brighton[Brighton$Response == "Yes",])/nrow(Brighton) # % of Brighton saying YES
+```
+
+Here I will try to automate the comparison of the models with ROC and AUC. The function here will find the best threshold for the model according to accuracy (total true pos + true neg divided by obs), outputting that accuracy level and the corresponding threshold, as well as the specificity and sensitivity (true pos/false neg + true pos) and (1 - specificity) (1 - true neg/(false pos + true neg).
+
+```{r}
+# read the training data
+Brighton <- campus_filter("Brighton")
+set.seed(529)
+split <- sample.split(Brighton$Response, SplitRatio = 0.75) # 75% in train set
+BrightonTrain <- subset(Brighton, split == TRUE)
+BrightonTest <- subset(Brighton, split == FALSE)
+
+confusion_test <- function(c, Campus, predict){
+  table(Campus$Response, predict >= c)
+}
+
+accuracy <- function(x, Campus){
+  
+  if (x[1,1] + x[2,1] == nrow(Campus)) {
+     x[1,1]/nrow(Campus)
+  }else{
+    (x[1,1] + x[2,2])/nrow(Campus)
+  }
+}
+
+specificity <- function(x){
+  x[2,1]/(x[2,1] + x[1,1])
+}
+
+sensitivity <- function(x, Campus){
+  
+  if (x[1,1] + x[2,1] == nrow(Campus)) {
+    return(0)
+  }else{
+    x[2,2]/(x[1,2] + x[2,2])
+  }
+}
+
+compare_accuracy <- function(mod, Campus){
+  threshold <- 0.5
+  predict <- predict(mod, type="response", newdata = Campus)
+  confusion <- confusion_test(threshold, Campus, predict) # pick threshold c
+  accuracy <- accuracy(confusion, Campus)
+  false.pos.rt <- 1 - specificity(confusion)
+  true.pos.rt <- sensitivity(confusion, Campus)
+  
+  # concordance-index (discrimination)
+  predpr <- predict(mod, type = c("response"), newdata = Campus)
+  roccurve <- roc(Campus$Response ~ predpr)
+  auc <- auc(roccurve) # larger is better
+  
+  # Hosmer and Lemeshow test (calibration)
+  # larger p-value is better
+  if (mod$formula == "Response ~ 1") {
+    H.L <- NA
+  }else{
+    H.L <- logitgof(BrightonTrain$Response, fitted(mod))$p.value
+  }
+  result <- cbind(threshold, accuracy, false.pos.rt, true.pos.rt, auc, H.L)
+  return(result)
+}
+
+models <- list(test1, test2, test3, test4, test5, test6, test7, test8, test9, test10, test11, test12, test13, test14, test15, test16, test17, test18, test19, test20)
+x <- as.data.frame(do_call_rbind(lapply(models, compare_accuracy, Campus = BrightonTest)))
+
+library(rcompanion)
+y <- compareGLM(test1, test2, test3, test4, test5, test6, test7, test8, test9, test10, test11, test12, test13, test14, test15, test16, test17, test18, test19, test20)
+
+comparison <- cbind(x, y)
+
+# compare all models with DeLong's Test and select best models
+
+#load pROC
+library(pROC)
+
+tests <- c("test1", "test2", "test3", "test4", "test5", "test6", "test7", "test8", "test9", "test10", "test11", "test12", "test13", "test14", "test15", "test16", "test17", "test18", "test19", "test20")
+
+#create roc object for test1, test2, test3
+pred1 <- predict(test1, type="response", newdata = BrightonTest)
+roc.out_test1 <- roc(BrightonTest$Response, pred1, plot=TRUE, smooth = FALSE)
+pred2 <- predict(test2, type="response", newdata = BrightonTest)
+roc.out_test2 <- roc(BrightonTest$Response, pred2, plot=TRUE, smooth = FALSE)
+pred3 <- predict(test3, type="response", newdata = BrightonTest)
+roc.out_test3 <- roc(BrightonTest$Response, pred3, plot=TRUE, smooth = FALSE)
+pred4 <- predict(test4, type="response", newdata = BrightonTest)
+roc.out_test4 <- roc(BrightonTest$Response, pred4, plot=TRUE, smooth = FALSE)
+pred5 <- predict(test5, type="response", newdata = BrightonTest)
+roc.out_test5 <- roc(BrightonTest$Response, pred5, plot=TRUE, smooth = FALSE)
+pred6 <- predict(test6, type="response", newdata = BrightonTest)
+roc.out_test6 <- roc(BrightonTest$Response, pred6, plot=TRUE, smooth = FALSE)
+pred7 <- predict(test7, type="response", newdata = BrightonTest)
+roc.out_test7 <- roc(BrightonTest$Response, pred7, plot=TRUE, smooth = FALSE)
+pred8 <- predict(test8, type="response", newdata = BrightonTest)
+roc.out_test8 <- roc(BrightonTest$Response, pred8, plot=TRUE, smooth = FALSE)
+pred9 <- predict(test9, type="response", newdata = BrightonTest)
+roc.out_test9 <- roc(BrightonTest$Response, pred9, plot=TRUE, smooth = FALSE)
+pred10 <- predict(test10, type="response", newdata = BrightonTest)
+roc.out_test10 <- roc(BrightonTest$Response, pred10, plot=TRUE, smooth = FALSE)
+pred11 <- predict(test11, type="response", newdata = BrightonTest)
+roc.out_test11 <- roc(BrightonTest$Response, pred11, plot=TRUE, smooth = FALSE)
+pred12 <- predict(test12, type="response", newdata = BrightonTest)
+roc.out_test12 <- roc(BrightonTest$Response, pred12, plot=TRUE, smooth = FALSE)
+pred13 <- predict(test13, type="response", newdata = BrightonTest)
+roc.out_test13 <- roc(BrightonTest$Response, pred13, plot=TRUE, smooth = FALSE)
+pred14 <- predict(test14, type="response", newdata = BrightonTest)
+roc.out_test14 <- roc(BrightonTest$Response, pred14, plot=TRUE, smooth = FALSE)
+pred15 <- predict(test15, type="response", newdata = BrightonTest)
+roc.out_test15 <- roc(BrightonTest$Response, pred15, plot=TRUE, smooth = FALSE)
+pred16 <- predict(test16, type="response", newdata = BrightonTest)
+roc.out_test16 <- roc(BrightonTest$Response, pred16, plot=TRUE, smooth = FALSE)
+pred17 <- predict(test17, type="response", newdata = BrightonTest)
+roc.out_test17 <- roc(BrightonTest$Response, pred17, plot=TRUE, smooth = FALSE)
+pred18 <- predict(test18, type="response", newdata = BrightonTest)
+roc.out_test18 <- roc(BrightonTest$Response, pred18, plot=TRUE, smooth = FALSE)
+pred19 <- predict(test19, type="response", newdata = BrightonTest)
+roc.out_test19 <- roc(BrightonTest$Response, pred19, plot=TRUE, smooth = FALSE)
+pred20 <- predict(test20, type="response", newdata = BrightonTest)
+roc.out_test20 <- roc(BrightonTest$Response, pred20, plot=TRUE, smooth = FALSE)
+
+all_tests <- combn(
+  list(
+    "test1" = roc.out_test1,
+    "test2" = roc.out_test2,
+    "test3" = roc.out_test3,
+    "test4" = roc.out_test4,
+    "test5" = roc.out_test5,
+    "test6" = roc.out_test6,
+    "test7" = roc.out_test7,
+    "test8" = roc.out_test8,
+    "test9" = roc.out_test9,
+    "test10" = roc.out_test10,
+    "test11" = roc.out_test11,
+    "test12" = roc.out_test12,
+    "test13" = roc.out_test13,
+    "test14" = roc.out_test14,
+    "test15" = roc.out_test15,
+    "test16" = roc.out_test16,
+    "test17" = roc.out_test17,
+    "test18" = roc.out_test18,
+    "test19" = roc.out_test19,
+    "test20" = roc.out_test20
+  ),
+  FUN = function(x, ...) roc.test(x[[1]], x[[2]]),
+  m = 2,
+  simplify = FALSE, 
+  reuse.auc = TRUE, 
+  method = "delong", 
+  na.rm = TRUE
+)
+
+tests_names <- combn(
+  list("test1", "test2", "test3", "test4", "test5", "test6", "test7", "test8", "test9", "test10", "test11", "test12", "test13", "test14", "test15", "test16", "test17", "test18", "test19", "test20"), 
+  m = 2, 
+  FUN = paste, 
+  simplify = TRUE, 
+  collapse = "_"
+)
+all_tests <- setNames(all_tests, tests_names)
+
+test_results <- function(x) { # x is a vector length of names(all_tests)
+  
+  p <- all_tests[[x]]$p.value
+  aucs <- as.vector(all_tests[[x]]$estimate)
+  if (p < 0.05) {
+    
+    if (aucs[1] > aucs[2]) {
+      
+      return(gsub("_test[0-9]+", "", tests_names[x]))
+      
+    }else{
+      
+      return(gsub("test[0-9]+_", "", tests_names[x]))
+      
+    }
+    
+  }else{
+    return(FALSE)
+  }
+}
+
+ranks <- sapply(1:length(names(all_tests)), test_results)
+x <- cbind(names(all_tests), ranks)
+
+rank_tests <- function(x, results){ # x is a vector length of names(all_tests)
+  
+  a <- as.vector(results[x,])
+  
+  if (a[2] == "FALSE") {
+    return(NULL)
+  }else{
+    return(gsub("_", "", gsub(a[2], "", a[1])))
+  }
+}
+
+best.auc <- comparison[! tests %in% unique(unlist(sapply(1:length(names(all_tests)), rank_tests, results = x))),]
+
+# automatically select model with best H-L result
+H.L1 <- comparison %>% pull(H.L)
+H.L <- H.L1[!is.na(H.L1)]
+best.H.L <- comparison[max(H.L) == H.L1,]
+best.H.L <- best.H.L %>% remove_missing()
+
+# bind with best auc
+best <- rbind(best.auc, best.H.L)
+unique(best) ## BEST MODELS ##
+```
+
+
+
+Brighton ends up having a lot of models that are relatively similar in AUC and H.L.
+
+```{r}
+BrightonModels_filtered <- unique(best) ## BEST MODELS ##
+BrightonModels <- comparison
+```
+
+# Golda Meir
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(gbm)
+
+# reformat data
+Golda <- filter(df, Campus == "Golda Meir")
+Golda$Campus <- NULL
+Golda$Response <- NULL
+# gbm requires y coded as 0/1 integer
+Golda$response <- as.integer(as.character(Golda$response))
+
+# GBM variable importance
+set.seed(1)
+gbm_imp = gbm(formula = response ~ ., distribution = "bernoulli", data = Golda, n.trees = 1000, interaction.depth = 1, verbose=TRUE, shrinkage = 0.01, cv.folds=0, keep.data = F)
+s = summary(gbm_imp)
+head(s)
+nearZeroVar(Golda)
+remove_missing(Golda)
+```
+
+According to the GBM model, there are no variables of no importance. Birthplace, Income, Health_Fctr, Lang, Age, and Living are most important. According to nearZeroVar, there are no insignificant variables. Therefore I will keep all variables. Remove rows with missing variables also only removes one row.
+
+```{r}
+# filter dataset by campus #
+campus_filter <- function(campus){ # name of campus
+  
+  loc <- filter(df, Campus == campus)
+  loc$Campus <- NULL
+  loc$response <- NULL
+  loc <- remove_missing(loc) # only 1 row of Golda
+  
+  values <- as.matrix(sapply(loc, function(x) length(unique(x))))
+  
+  if (values[1,1] == 1) { # if ALL Response are YESs or NOs
+    
+    print("Unanimous Response")
+    
+  }else{
+    
+    if (sum(values[,1] == 1) >= 1) { # if any vars have only one unique value
+      
+      delete <- rownames(values)[values[,1] == 1] # list of homogeneous vars
+      x <- colnames(loc)[!colnames(loc) %in% c(delete)] # remove vars from list of vars
+      loc %>% dplyr::select(x)
+      
+    }else{
+      
+      return(loc)
+      
+    }
+  }
+}
+```
+
+Next I will look at the model given by bestglm.
+
+```{r}
+# reformat data
+Golda <- campus_filter("Golda Meir")
+Golda <- within(Golda, { # y must be last var
+    y <- Response         # into y
+    Response  <- NULL        # Delete 
+})
+
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(bestglm)
+
+ # find the model with the best AIC
+bestAIC = bestglm(Golda, family = binomial, IC = "AIC")
+ 
+# Show top 5 models
+bestAIC$BestModels
+ 
+# show a summary of the best model
+summary(bestAIC$BestModel)
+# show the relationship between the number of predictors and the model quality
+plot(seq_len(nrow(bestAIC$Subsets)) - 1, bestAIC$Subsets[,"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+ 
+# show again, but cap it at 4 predictors
+plot(seq_len(5) - 1, bestAIC$Subsets[seq_len(5),"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+```
+
+Income is in every model while Lang, Birthplace, Living, Working, Health_Fctr, Drives, and same are in none. The best model using bestglm uses Age and Income with an AIC = 246.15. AIC is lowest with only 2 terms. (Using BIC, the best model has only an intercept). Notably, bestglm does not consider interaction terms.
+
+Next I will look at the models given by glmulti.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Golda <- campus_filter("Golda Meir")
+
+# replicate the analysis done by bestglm using AIC
+bestAIC2 = glmulti(Response ~ ., data = Golda, family = binomial, level = 1, crit=aic, fitfunc=glm, method="h",
+confsetsize = 256, plotty = F, report = F)
+ 
+print(bestAIC2)
+bestAIC2@formulas[1:5]
+bestAIC2@objects[[4]]
+```
+
+Using BIC, glmulti would say the model with only an intercept is the best. This isn't true, so I will use AIC. The best model it gives has an AIC of 234.67 (better) with the predictors Lang, Birthplace, Living, and Age. Again, glmulti does not consider interactions. The next best model (AIC = 235.9) removes Living. The next best (AIC = 236) added na_count to the first model. The next best (AIC = 236.1) removed Age from the first model. The fifth best (AIC = 236.2) added Income to the first model.
+
+Next I will test glmulti allowing it to look for interaction terms, but for the sake of time I will limit the variables under consideration to the top five found by the GBM. The dataset is the same.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Golda <- campus_filter("Golda Meir")
+
+# allow for 2-way interactions
+bestAIC3 = glmulti(Response ~ Income + Health_Fctr + Lang + Age + Living, data = Golda, family = binomial, level = 2, crit=aic, fitfunc=glm, method="g", confsetsize = 256, plotty = F, report = F)
+
+print(bestAIC3)
+bestAIC3@formulas[1:5]
+bestAIC3@objects[[5]]
+```
+
+Using BIC, glmulti would say the model with only an intercept is the best. Using AIC and limiting the predictors considered to the top ones found by the GBM minus Birthplace, the best model has an AIC of 245.84 (worse than before) with the interaction between Age and Income. The second best model (AIC = 246.4) has the additional predictor Age. Slightly worse (AIC = 246.5) is a model with only Income. Slightly worse (AIC = 247.4) is a model with Income and the interaction between Income and Health_Fctr. Slightly worse (AIC = 247.4) is a model with Income and the interaction between Age and Income. 
+
+There are many limitations to glmulti, so I will use these following techniques to see if it's possible to improve on automatic model selection.
+
+First off, since I keep running into separation with the models. There doesn't seem to be a reason for perfect separation, so I will try to prevent it.
+
+```{r}
+# expand a dot formula to show all of the terms
+expandDotFormula = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+ # allow for dot-style formula
+ if (gsub("()", "", f[3], fixed=TRUE) == ".")
+ {
+ nm = names(dat)
+ nm = nm[nm != target]
+ fAdj = formula(paste(target, " ~ ", paste(nm, collapse=" + "), sep=""))
+ }
+ return (fAdj)
+}
+ 
+# test whether a specific term in a formula will cause separation
+termHasSeparation = function(target, predictor, dat)
+{
+ cols = unlist(strsplit(predictor, ":"))
+ isFactor = sapply(cols, function(x) class(dat[,x]) == "character" || class(dat[,x]) == "factor")
+ if (sum(isFactor) == 0) {
+   return (FALSE)
+ }else{ # check whether there are cells in which there are all zeroes
+   fff <- formula(paste(" ~ ", target, " + ", paste(cols[isFactor], collapse=" + "), sep = ""))
+   if (sum(xtabs(fff, data = dat) == 0) > 0) {
+     return (TRUE)
+   }else{ # check whether there are cells in which there are all ones
+     if (sum(xtabs(fff, data = dat) == 1) > 0) {
+       return (TRUE)
+     }else{ # check whether there are cells with no exposure
+       nPossibleCells = prod(sapply(cols[isFactor], function(x) length(unique(dat[,x]))))
+       nActualCells = prod(dim(xtabs(fff, data = dat)))
+       if (nActualCells < nPossibleCells) {
+         return (TRUE)
+       }else{
+         return (FALSE)
+       }
+     }
+   }
+ }
+}
+# test whether a formula will cause separation
+fHasSeparation = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+  
+ ff <- expandDotFormula(f, dat)
+ tt <- terms(ff)
+ ttf <- attr(tt, "factors")
+  
+ # ttf has columns that represent individual terms of the formula
+ fTerms <- colnames(ttf)
+ # check each term whether it exhibits separation
+ reject <- any(sapply(fTerms, function(x) termHasSeparation(target, x, dat)))
+  
+ return (reject)
+}
+ 
+# this function returns a NULL model if the formula causes separation
+noSeparationGLM = function(f, data){
+  
+ if (fHasSeparation(f, data)) {
+    target = gsub("()", "", f[2], fixed=TRUE)
+    a = formula(paste(target, " ~ 1", sep=""))
+    return (glm(a, data = data, family = binomial(link=logit)))
+ }else{
+   
+ return (glm(f, data = data, family = binomial(link=logit)))
+   
+ }
+}
+```
+
+```{r} 
+# test some formulae
+fHasSeparation(Response ~ 1, Golda)
+fHasSeparation(Response ~ 1 + Age + Income, Golda)
+fHasSeparation(Response ~ 1 + Lang + Birthplace + Living + Age, Golda)
+fHasSeparation(Response ~ 1 + Age:Income, Golda)
+ 
+# test some GLMs
+noSeparationGLM(Response ~ 1, Golda)
+noSeparationGLM(Response ~ 1 + Age + Income, Golda)
+noSeparationGLM(Response ~ 1 + Lang + Birthplace + Living + Age, Golda)
+noSeparationGLM(Response ~ 1 + Age:Income, Golda)
+```
+
+Only the top of the second model has separation.
+
+Here are the variables and interactions that cause separation.
+
+```{r}
+# list the columns that cause separation
+names(Golda[,-1])[sapply(names(Golda[,-1]), function(x) termHasSeparation("Response", x, Golda))]
+ 
+# list the pairs of columns that cause separation
+colPairs = expand.grid(names(Golda[,-1]), names(Golda[,-1]))
+colPairs = colPairs[apply(colPairs, 1, function(x) x[1] != x[2]),]
+combinations = apply(colPairs, 1, function(x) paste(x, collapse=":"))
+combinations[sapply(combinations, function(x) termHasSeparation("Response", x, Golda))]
+```
+
+I will now try to use glmulti but reject models that have separation.
+
+```{r}
+# fit a GLM allowing that possible models will be rejected due to separation
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+
+# read the training data
+Golda <- campus_filter("Golda Meir")
+ 
+glms = glmulti(Response ~ ., data = Golda, level = 1, method="g", fitfunc = noSeparationGLM, confsetsize = 256, plotty = F, report = F)
+ 
+# show the result - note the absence of columns that cause separation
+ 
+summary(glms)$bestmodel
+print(glms)
+
+glms@objects[[5]]
+```
+
+This results is a model with Age and Income as predictors and an AIC of 246.15. This is without considering interactions. The next best model (AIC = 246.5) removes Age. The next best model (AIC = 247.1) adds na_count to the first model. The next best model (AIC = 248.2) uses Health_Fctr and Income. The fifth best model (AIC = 248.2) only has an intercept.
+
+I will try to do this again but also consider interactions, by using custom genetic algorithms.
+
+```{r}
+# a function to create GLM formulae from an indicator vector
+createFormula = function(indicators)
+{
+ # do the special case of no predictor columns, so use NULL model
+ if (sum(indicators) == 0)
+ return (formula(paste(target, " ~ 1", sep="")))
+  
+ # the more common case
+ return (formula(paste(target, " ~ ", paste(predictors[indicators == 1], collapse = " + "))))
+}
+
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(memoise)
+ 
+# read the training data
+Golda <- campus_filter("Golda Meir")
+
+# the function to be optimised
+glmScore = function(indicators)
+{
+ # return a NULL model if any errors or warnings occur
+ glm.mod = tryCatch (
+ glm(createFormula(indicators), data = Golda, family = binomial(link=logit)),
+ error = function(e) glm(createFormula(indicators * 0), data = Golda, family = binomial(link=logit)),
+ warning = function(w) glm(createFormula(indicators * 0), data = Golda, family = binomial(link=logit))
+ )
+ # if there are problems with NA parameters (e.g. via separation), then use a NULL model
+ if (any(is.na(coef(glm.mod))))
+ glm.mod = glm(createFormula(indicators * 0), data = Golda, family = binomial(link=logit))
+ print(glm.mod$formula)
+ return(AIC(glm.mod))
+}
+ 
+glmScr = memoise(glmScore)
+
+# a vector of names of predictor columns
+target = "Response"
+predictors = names(Golda)
+predictors = predictors[predictors != target]
+indices = expand.grid(seq_len(length(predictors)), seq_len(length(predictors)))
+indices = indices[indices[,1] != indices[,2],]
+twoWays = apply(indices, 1, function(x) paste(predictors[x], collapse = ":"))
+predictors = c(predictors, twoWays)
+length(predictors)
+```
+
+There are 121 possible predictors, so 2^121 possible formulae.
+
+```{r}
+# custom function to create an initial population
+initPopn = function (object, ...) 
+{
+ population = matrix(0, nrow = object@popSize, ncol = object@nBits)
+ n = ncol(Golda) - 1
+ probability = min(1, 2 / n)
+ ones = matrix(rbinom(n * object@popSize, 1, probability), object@popSize, n)
+ population[,seq_len(n)] = ones
+ return(population)
+}
+ 
+set.seed(1)
+ 
+ga.mod.2 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors), population = initPopn, popSize = 100, parallel = TRUE, run = 5)
+```
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(gbm)
+
+# reformat data
+Golda <- filter(df, Campus == "Golda Meir")
+Golda$Campus <- NULL
+Golda$Response <- NULL
+# gbm requires y coded as 0/1 integer
+Golda$response <- as.integer(as.character(Golda$response))
+
+# GBM variable importance
+set.seed(1)
+gbm_imp = gbm(formula = response ~ ., distribution = "bernoulli", data = Golda, n.trees = 1000, interaction.depth = 1, verbose=TRUE, shrinkage = 0.01, cv.folds=0, keep.data = F)
+s = summary(gbm_imp)
+head(s)
+nearZeroVar(Golda)
+remove_missing(Golda)
+```
+
+According to the GBM model, there are no variables of no importance. Birthplace, Income, Health_Fctr, Lang, Age, and Living are most important. According to nearZeroVar, there are no insignificant variables. Therefore I will keep all variables. Remove rows with missing variables also only removes one row.
+
+```{r}
+# filter dataset by campus #
+campus_filter <- function(campus){ # name of campus
+  
+  loc <- filter(df, Campus == campus)
+  loc$Campus <- NULL
+  loc$response <- NULL
+  loc <- remove_missing(loc) # only 1 row of Golda
+  
+  values <- as.matrix(sapply(loc, function(x) length(unique(x))))
+  
+  if (values[1,1] == 1) { # if ALL Response are YESs or NOs
+    
+    print("Unanimous Response")
+    
+  }else{
+    
+    if (sum(values[,1] == 1) >= 1) { # if any vars have only one unique value
+      
+      delete <- rownames(values)[values[,1] == 1] # list of homogeneous vars
+      x <- colnames(loc)[!colnames(loc) %in% c(delete)] # remove vars from list of vars
+      loc %>% dplyr::select(x)
+      
+    }else{
+      
+      return(loc)
+      
+    }
+  }
+}
+```
+
+Next I will look at the model given by bestglm.
+
+```{r}
+# reformat data
+Golda <- campus_filter("Golda Meir")
+Golda <- within(Golda, { # y must be last var
+    y <- Response         # into y
+    Response  <- NULL        # Delete 
+})
+
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(bestglm)
+
+ # find the model with the best AIC
+bestAIC = bestglm(Golda, family = binomial, IC = "AIC")
+ 
+# Show top 5 models
+bestAIC$BestModels
+ 
+# show a summary of the best model
+summary(bestAIC$BestModel)
+# show the relationship between the number of predictors and the model quality
+plot(seq_len(nrow(bestAIC$Subsets)) - 1, bestAIC$Subsets[,"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+ 
+# show again, but cap it at 4 predictors
+plot(seq_len(5) - 1, bestAIC$Subsets[seq_len(5),"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+```
+
+Income is in every model while Lang, Birthplace, Living, Working, Health_Fctr, Drives, and same are in none. The best model using bestglm uses Age and Income with an AIC = 246.15. AIC is lowest with only 2 terms. (Using BIC, the best model has only an intercept). Notably, bestglm does not consider interaction terms.
+
+Next I will look at the models given by glmulti.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Golda <- campus_filter("Golda Meir")
+
+# replicate the analysis done by bestglm using AIC
+bestAIC2 = glmulti(Response ~ ., data = Golda, family = binomial, level = 1, crit=aic, fitfunc=glm, method="h",
+confsetsize = 256, plotty = F, report = F)
+ 
+print(bestAIC2)
+bestAIC2@formulas[1:5]
+bestAIC2@objects[[4]]
+```
+
+Using BIC, glmulti would say the model with only an intercept is the best. This isn't true, so I will use AIC. The best model it gives has an AIC of 234.67 (better) with the predictors Lang, Birthplace, Living, and Age. Again, glmulti does not consider interactions. The next best model (AIC = 235.9) removes Living. The next best (AIC = 236) added na_count to the first model. The next best (AIC = 236.1) removed Age from the first model. The fifth best (AIC = 236.2) added Income to the first model.
+
+Next I will test glmulti allowing it to look for interaction terms, but for the sake of time I will limit the variables under consideration to the top five found by the GBM. The dataset is the same.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Golda <- campus_filter("Golda Meir")
+
+# allow for 2-way interactions
+bestAIC3 = glmulti(Response ~ Income + Health_Fctr + Lang + Age + Living, data = Golda, family = binomial, level = 2, crit=aic, fitfunc=glm, method="g", confsetsize = 256, plotty = F, report = F)
+
+print(bestAIC3)
+bestAIC3@formulas[1:5]
+bestAIC3@objects[[5]]
+```
+
+Using BIC, glmulti would say the model with only an intercept is the best. Using AIC and limiting the predictors considered to the top ones found by the GBM minus Birthplace, the best model has an AIC of 245.84 (worse than before) with the interaction between Age and Income. The second best model (AIC = 246.4) has the additional predictor Age. Slightly worse (AIC = 246.5) is a model with only Income. Slightly worse (AIC = 247.4) is a model with Income and the interaction between Income and Health_Fctr. Slightly worse (AIC = 247.4) is a model with Income and the interaction between Age and Income. 
+
+There are many limitations to glmulti, so I will use these following techniques to see if it's possible to improve on automatic model selection.
+
+First off, since I keep running into separation with the models. There doesn't seem to be a reason for perfect separation, so I will try to prevent it.
+
+```{r}
+# expand a dot formula to show all of the terms
+expandDotFormula = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+ # allow for dot-style formula
+ if (gsub("()", "", f[3], fixed=TRUE) == ".")
+ {
+ nm = names(dat)
+ nm = nm[nm != target]
+ fAdj = formula(paste(target, " ~ ", paste(nm, collapse=" + "), sep=""))
+ }
+ return (fAdj)
+}
+ 
+# test whether a specific term in a formula will cause separation
+termHasSeparation = function(target, predictor, dat)
+{
+ cols = unlist(strsplit(predictor, ":"))
+ isFactor = sapply(cols, function(x) class(dat[,x]) == "character" || class(dat[,x]) == "factor")
+ if (sum(isFactor) == 0) {
+   return (FALSE)
+ }else{ # check whether there are cells in which there are all zeroes
+   fff <- formula(paste(" ~ ", target, " + ", paste(cols[isFactor], collapse=" + "), sep = ""))
+   if (sum(xtabs(fff, data = dat) == 0) > 0) {
+     return (TRUE)
+   }else{ # check whether there are cells in which there are all ones
+     if (sum(xtabs(fff, data = dat) == 1) > 0) {
+       return (TRUE)
+     }else{ # check whether there are cells with no exposure
+       nPossibleCells = prod(sapply(cols[isFactor], function(x) length(unique(dat[,x]))))
+       nActualCells = prod(dim(xtabs(fff, data = dat)))
+       if (nActualCells < nPossibleCells) {
+         return (TRUE)
+       }else{
+         return (FALSE)
+       }
+     }
+   }
+ }
+}
+# test whether a formula will cause separation
+fHasSeparation = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+  
+ ff <- expandDotFormula(f, dat)
+ tt <- terms(ff)
+ ttf <- attr(tt, "factors")
+  
+ # ttf has columns that represent individual terms of the formula
+ fTerms <- colnames(ttf)
+ # check each term whether it exhibits separation
+ reject <- any(sapply(fTerms, function(x) termHasSeparation(target, x, dat)))
+  
+ return (reject)
+}
+ 
+# this function returns a NULL model if the formula causes separation
+noSeparationGLM = function(f, data){
+  
+ if (fHasSeparation(f, data)) {
+    target = gsub("()", "", f[2], fixed=TRUE)
+    a = formula(paste(target, " ~ 1", sep=""))
+    return (glm(a, data = data, family = binomial(link=logit)))
+ }else{
+   
+ return (glm(f, data = data, family = binomial(link=logit)))
+   
+ }
+}
+```
+
+```{r} 
+# test some formulae
+fHasSeparation(Response ~ 1, Golda)
+fHasSeparation(Response ~ 1 + Age + Income, Golda)
+fHasSeparation(Response ~ 1 + Lang + Birthplace + Living + Age, Golda)
+fHasSeparation(Response ~ 1 + Age:Income, Golda)
+ 
+# test some GLMs
+noSeparationGLM(Response ~ 1, Golda)
+noSeparationGLM(Response ~ 1 + Age + Income, Golda)
+noSeparationGLM(Response ~ 1 + Lang + Birthplace + Living + Age, Golda)
+noSeparationGLM(Response ~ 1 + Age:Income, Golda)
+```
+
+Only the top of the second model has separation.
+
+Here are the variables and interactions that cause separation.
+
+```{r}
+# list the columns that cause separation
+names(Golda[,-1])[sapply(names(Golda[,-1]), function(x) termHasSeparation("Response", x, Golda))]
+ 
+# list the pairs of columns that cause separation
+colPairs = expand.grid(names(Golda[,-1]), names(Golda[,-1]))
+colPairs = colPairs[apply(colPairs, 1, function(x) x[1] != x[2]),]
+combinations = apply(colPairs, 1, function(x) paste(x, collapse=":"))
+combinations[sapply(combinations, function(x) termHasSeparation("Response", x, Golda))]
+```
+
+I will now try to use glmulti but reject models that have separation.
+
+```{r}
+# fit a GLM allowing that possible models will be rejected due to separation
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+
+# read the training data
+Golda <- campus_filter("Golda Meir")
+ 
+glms = glmulti(Response ~ ., data = Golda, level = 1, method="g", fitfunc = noSeparationGLM, confsetsize = 256, plotty = F, report = F)
+ 
+# show the result - note the absence of columns that cause separation
+ 
+summary(glms)$bestmodel
+print(glms)
+
+glms@objects[[5]]
+```
+
+This results is a model with Age and Income as predictors and an AIC of 246.15. This is without considering interactions. The next best model (AIC = 246.5) removes Age. The next best model (AIC = 247.1) adds na_count to the first model. The next best model (AIC = 248.2) uses Health_Fctr and Income. The fifth best model (AIC = 248.2) only has an intercept.
+
+I will try to do this again but also consider interactions, by using custom genetic algorithms.
+
+```{r}
+# a function to create GLM formulae from an indicator vector
+createFormula = function(indicators)
+{
+ # do the special case of no predictor columns, so use NULL model
+ if (sum(indicators) == 0)
+ return (formula(paste(target, " ~ 1", sep="")))
+  
+ # the more common case
+ return (formula(paste(target, " ~ ", paste(predictors[indicators == 1], collapse = " + "))))
+}
+
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(memoise)
+ 
+# read the training data
+Golda <- campus_filter("Golda Meir")
+
+# the function to be optimised
+glmScore = function(indicators)
+{
+ # return a NULL model if any errors or warnings occur
+ glm.mod = tryCatch (
+ glm(createFormula(indicators), data = Golda, family = binomial(link=logit)),
+ error = function(e) glm(createFormula(indicators * 0), data = Golda, family = binomial(link=logit)),
+ warning = function(w) glm(createFormula(indicators * 0), data = Golda, family = binomial(link=logit))
+ )
+ # if there are problems with NA parameters (e.g. via separation), then use a NULL model
+ if (any(is.na(coef(glm.mod))))
+ glm.mod = glm(createFormula(indicators * 0), data = Golda, family = binomial(link=logit))
+ print(glm.mod$formula)
+ return(AIC(glm.mod))
+}
+ 
+glmScr = memoise(glmScore)
+
+# a vector of names of predictor columns
+target = "Response"
+predictors = names(Golda)
+predictors = predictors[predictors != target]
+indices = expand.grid(seq_len(length(predictors)), seq_len(length(predictors)))
+indices = indices[indices[,1] != indices[,2],]
+twoWays = apply(indices, 1, function(x) paste(predictors[x], collapse = ":"))
+predictors = c(predictors, twoWays)
+length(predictors)
+```
+
+There are 121 possible predictors, so 2^121 possible formulae.
+
+```{r}
+# custom function to create an initial population
+initPopn = function (object, ...) 
+{
+ population = matrix(0, nrow = object@popSize, ncol = object@nBits)
+ n = ncol(Golda) - 1
+ probability = min(1, 2 / n)
+ ones = matrix(rbinom(n * object@popSize, 1, probability), object@popSize, n)
+ population[,seq_len(n)] = ones
+ return(population)
+}
+ 
+set.seed(1)
+ 
+ga.mod.2 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors), population = initPopn, popSize = 100, parallel = TRUE, run = 5)
+```
+
+```{r}
+GoldaModels_filtered <- unique(best) ## BEST MODELS ##
+GoldaModels <- comparison
+```
+
+# Coleman
+
+```{r}
+# filter dataset by campus #
+campus_filter <- function(campus){ # name of campus
+  
+  loc <- filter(df, Campus == campus)
+  loc$Campus <- NULL
+  loc$response <- NULL
+  loc <- remove_missing(loc)
+  # remove low variance columns
+  loc <- loc[,-nearZeroVar(loc)]
+  
+  values <- as.matrix(sapply(loc, function(x) length(unique(x))))
+  
+  if (values[1,1] == 1) { # if ALL Response are YESs or NOs
+    
+    print("Unanimous Response")
+    
+  }else{
+    
+    if (sum(values[,1] == 1) >= 1) { # if any vars have only one unique value
+      
+      delete <- rownames(values)[values[,1] == 1] # list of homogeneous vars
+      x <- colnames(loc)[!colnames(loc) %in% c(delete)] # remove vars from list of vars
+      loc %>% dplyr::select(x)
+      
+    }else{
+      
+      return(loc)
+      
+    }
+  }
+}
+```
+
+# Coleman
+
+First I will look at the relative importance of predictors using GBM.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(gbm)
+
+# reformat data
+Coleman <- df %>% filter(Campus == "Coleman")
+Coleman$Response <- NULL
+Coleman$Campus <- NULL
+# gbm requires y coded as 0/1 integer
+Coleman$response <- as.integer(as.character(Coleman$response))
+
+# GBM variable importance
+set.seed(1)
+gbm_imp = gbm(formula = response ~ ., distribution = "bernoulli", data = Coleman, n.trees = 1000, interaction.depth = 1, verbose=TRUE, shrinkage = 0.01, cv.folds=0, keep.data = F)
+s = summary(gbm_imp)
+head(s)
+s
+```
+
+According to the GBM model, "unknowns" is the only variable of no importance. Health_Fctr, Income, and Birthplace are the most important, followed by Age a bit behind, closely by Frailty, and far behind is same. Therefore I will remove unknowns from consideration.
+
+Next I will look at the model given by bestglm.
+
+```{r}
+# reformat data
+Coleman <- df %>% filter(Campus == "Coleman")
+Coleman <- within(Coleman, { # y must be last var
+    response   <- NULL        # Delete
+    Campus  <- NULL
+    unknowns <- NULL
+    y    <- Response         # Coleman into y
+    Response  <- NULL        # Delete Coleman
+})
+
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(bestglm)
+
+ # find the model with the best AIC
+bestAIC = bestglm(Coleman, family = binomial, IC = "AIC")
+ 
+# Show top 5 models
+bestAIC$BestModels
+ 
+# show a summary of the best model
+summary(bestAIC$BestModel)
+# show the relationship between the number of predictors and the model quality
+plot(seq_len(nrow(bestAIC$Subsets)) - 1, bestAIC$Subsets[,"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+ 
+# show again, but cap it at 4 predictors
+plot(seq_len(5) - 1, bestAIC$Subsets[seq_len(5),"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+```
+
+According to model selection with bestglm using AIC, the variables that are not important are Age, Lang, Birthplace, na_count, and Drives. The best model uses Health_Fctr and same with an AIC of 216.55. Graphing the models shows that having 2 predictors gives the lowest AIC. (Using BIC, the best model has only an intercept). Notably, bestglm does not consider interaction terms. 
+
+Next I will look at the models given by glmulti.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Coleman <- campus_filter("Coleman")
+
+# replicate the analysis done by bestglm using AIC
+bestAIC2 = glmulti(Response ~ ., data = Coleman, family = binomial, level = 1, crit=aic, fitfunc=glm, method="h",
+confsetsize = 256, plotty = F, report = F)
+ 
+print(bestAIC2)
+```
+
+Using BIC, glmulti would say the model with only an intercept is the best. This isn't true, so I will use AIC. The best model it gives has an AIC of 207.62 with the predictors Birthplace, Living, Health_Fctr, and Income. Again, glmulti does not consider interactions.
+
+Next I will test glmulti allowing it to look for interaction terms, but for the sake of time I will limit the variables under consideration to the top six found by the GBM. The dataset is the same.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Coleman <- campus_filter("Coleman")
+
+# allow for 2-way interactions
+bestAIC3 = glmulti(Response ~ Birthplace + Health_Fctr + Age + Income + Frailty + same, data = Coleman, family = binomial, level = 2, crit=aic, fitfunc=glm, method="g", confsetsize = 256, plotty = F, report = F)
+
+print(bestAIC3)
+bestAIC3@formulas[1:5]
+```
+
+Using BIC, glmulti would say the model with only an intercept is the best. Using AIC and limiting the predictors considered to the ones found when no predictors were considered, the best model has an AIC of 204.79 (better than before) with predictors Health_Fctr, same, Age, Frailty, and interactions btwn Frailty and Income, Birthplace and Age, same and Age, and same and Frailty. The second best model (AIC = 204.9) includes an interaction between Income and Age.
+
+There are many limitations to glmulti, so I will use these following techniques to see if it's possible to improve on automatic model selection.
+
+First off, since I keep running into separation with the models. There doesn't seem to be a reason for perfect separation, so I will try to prevent it.
+
+```{r}
+# expand a dot formula to show all of the terms
+expandDotFormula = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+ # allow for dot-style formula
+ if (gsub("()", "", f[3], fixed=TRUE) == ".")
+ {
+ nm = names(dat)
+ nm = nm[nm != target]
+ fAdj = formula(paste(target, " ~ ", paste(nm, collapse=" + "), sep=""))
+ }
+ return (fAdj)
+}
+ 
+# test whether a specific term in a formula will cause separation
+termHasSeparation = function(target, predictor, dat)
+{
+ cols = unlist(strsplit(predictor, ":"))
+ isFactor = sapply(cols, function(x) class(dat[,x]) == "character" || class(dat[,x]) == "factor")
+ if (sum(isFactor) == 0) {
+   return (FALSE)
+ }else{ # check whether there are cells in which there are all zeroes
+   fff <- formula(paste(" ~ ", target, " + ", paste(cols[isFactor], collapse=" + "), sep = ""))
+   if (sum(xtabs(fff, data = dat) == 0) > 0) {
+     return (TRUE)
+   }else{ # check whether there are cells in which there are all ones
+     if (sum(xtabs(fff, data = dat) == 1) > 0) {
+       return (TRUE)
+     }else{ # check whether there are cells with no exposure
+       nPossibleCells = prod(sapply(cols[isFactor], function(x) length(unique(dat[,x]))))
+       nActualCells = prod(dim(xtabs(fff, data = dat)))
+       if (nActualCells < nPossibleCells) {
+         return (TRUE)
+       }else{
+         return (FALSE)
+       }
+     }
+   }
+ }
+}
+# test whether a formula will cause separation
+fHasSeparation = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+  
+ ff <- expandDotFormula(f, dat)
+ tt <- terms(ff)
+ ttf <- attr(tt, "factors")
+  
+ # ttf has columns that represent individual terms of the formula
+ fTerms <- colnames(ttf)
+ # check each term whether it exhibits separation
+ reject <- any(sapply(fTerms, function(x) termHasSeparation(target, x, dat)))
+  
+ return (reject)
+}
+ 
+# this function returns a NULL model if the formula causes separation
+noSeparationGLM = function(f, data){
+  
+ if (fHasSeparation(f, data)) {
+    target = gsub("()", "", f[2], fixed=TRUE)
+    a = formula(paste(target, " ~ 1", sep=""))
+    return (glm(a, data = data, family = binomial(link=logit)))
+ }else{
+   
+ return (glm(f, data = data, family = binomial(link=logit)))
+   
+ }
+}
+```
+
+```{r} 
+# test some formulae
+fHasSeparation(Response ~ ., Coleman)
+fHasSeparation(Response ~ Birthplace, Coleman)
+fHasSeparation(Response ~ Health_Fctr, Coleman)
+fHasSeparation(Response ~ Birthplace + Health_Fctr, Coleman)
+ 
+# test some GLMs
+noSeparationGLM(Response ~ Drives + Income, Coleman)
+noSeparationGLM(Response ~ Health_Fctr + same, Coleman)
+noSeparationGLM(Response ~ 1 + Birthplace + Living + Health_Fctr + Income, Coleman)
+noSeparationGLM(Response ~ 1 + Health_Fctr + same + Age + Frailty + Frailty:Income + 
+    Birthplace:Age + same:Age + same:Frailty, Coleman)
+noSeparationGLM(Response ~ 1 + Health_Fctr + same + Age + Frailty + Income:Age + 
+    Frailty:Income + Birthplace:Age + same:Age + same:Frailty, Coleman)
+```
+
+
+If I reject models with separation, all of the models I have found so far would be rejected. 
+
+Here are the variables and interactions that cause separation.
+
+```{r}
+# list the columns that cause separation
+names(Coleman[,-1])[sapply(names(Coleman[,-1]), function(x) termHasSeparation("Response", x, Coleman))]
+ 
+# list the pairs of columns that cause separation
+colPairs = expand.grid(names(Coleman[,-1]), names(Coleman[,-1]))
+colPairs = colPairs[apply(colPairs, 1, function(x) x[1] != x[2]),]
+combinations = apply(colPairs, 1, function(x) paste(x, collapse=":"))
+combinations[sapply(combinations, function(x) termHasSeparation("Response", x, Coleman))]
+```
+
+Lang, Birthplace, Living, Working, Health_Fctr, and same all cause separation. Combinations of them also cause separation.
+
+I will now try to use glmulti but reject models that have separation.
+
+```{r}
+# fit a GLM allowing that possible models will be rejected due to separation
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+
+# read the training data
+Coleman <- campus_filter("Coleman")
+ 
+glms = glmulti(Response ~ ., data = Coleman, level = 1, method="g", fitfunc = noSeparationGLM, confsetsize = 256, plotty = F, report = F)
+ 
+# show the result - note the absence of columns that cause separation
+ 
+summary(glms)$bestmodel
+print(glms)
+```
+
+This results in a model with only Frailty as a predictor and an AIC of 224.29. This is without considering interactions.
+
+I will try to do this again but also consider interactions, by using custom genetic algorithms. 
+
+```{r}
+# a function to create GLM formulae from an indicator vector
+createFormula = function(indicators)
+{
+ # do the special case of no predictor columns, so use NULL model
+ if (sum(indicators) == 0)
+ return (formula(paste(target, " ~ 1", sep="")))
+  
+ # the more common case
+ return (formula(paste(target, " ~ ", paste(predictors[indicators == 1], collapse = " + "))))
+}
+```
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(memoise)
+ 
+# read the training data
+Coleman <- campus_filter("Coleman")
+
+# the function to be optimised
+glmScore = function(indicators)
+{
+ # return a NULL model if any errors or warnings occur
+ glm.mod = tryCatch (
+ glm(createFormula(indicators), data = Coleman, family = binomial(link=logit)),
+ error = function(e) glm(createFormula(indicators * 0), data = Coleman, family = binomial(link=logit)),
+ warning = function(w) glm(createFormula(indicators * 0), data = Coleman, family = binomial(link=logit))
+ )
+ # if there are problems with NA parameters (e.g. via separation), then use a NULL model
+ if (any(is.na(coef(glm.mod))))
+ glm.mod = glm(createFormula(indicators * 0), data = Coleman, family = binomial(link=logit))
+ print(glm.mod$formula)
+ return(AIC(glm.mod))
+}
+ 
+glmScr = memoise(glmScore)
+```
+
+
+```{r}
+# a vector of names of predictor columns
+target = "Response"
+predictors = names(Coleman)
+predictors = predictors[predictors != target]
+indices = expand.grid(seq_len(length(predictors)), seq_len(length(predictors)))
+indices = indices[indices[,1] != indices[,2],]
+twoWays = apply(indices, 1, function(x) paste(predictors[x], collapse = ":"))
+predictors = c(predictors, twoWays)
+length(predictors)
+```
+
+There are 121 possible predictors, so 2^121 possible formulae.
+
+```{r}
+# custom function to create an initial population
+initPopn = function (object, ...) 
+{
+ population = matrix(0, nrow = object@popSize, ncol = object@nBits)
+ n = ncol(Coleman) - 1
+ probability = min(1, 2 / n)
+ ones = matrix(rbinom(n * object@popSize, 1, probability), object@popSize, n)
+ population[,seq_len(n)] = ones
+ return(population)
+}
+ 
+set.seed(1)
+ 
+ga.mod.2 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors), population = initPopn, popSize = 100, parallel = TRUE, run = 5)
+```
+
+```{r}
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.2@solution)], collapse=" + "))
+test <- glm(x, Coleman, family = "binomial"); summary(test)
+```
+
+The best model this gives uses the predictors Income, Health_Fctr, and same with an AIC of 217.35. This is better than what was found by glmulti.
+
+Now I will do this one more time and also consider interactions.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(memoise, caret, GA)
+ 
+# function to show a formula as text
+f2text = function(f)
+{
+ if (class(f) != "formula")
+ stop("f is not a formula!")
+ return(paste(as.character(f)[c(2,1,3)], sep = "", collapse = " "))
+}
+ 
+Coleman <- campus_filter("Coleman")
+ 
+# a vector of names of predictor columns
+target = "Response"
+predictors = names(Coleman)
+predictors = predictors[predictors != target]
+indices = expand.grid(seq_len(length(predictors)), seq_len(length(predictors)))
+indices = indices[indices[,1] < indices[,2],]
+twoWays = apply(indices, 1, function(x) paste(predictors[x], collapse = ":"))
+predictors = c(predictors, twoWays)
+length(predictors)
+ 
+# a function to create GLM formulae from an indicator vector
+createFormula = function(indicators)
+{
+ if (is.null(indicators))
+ stop("createFormula: indicators is NULL!")
+ if (any(is.na(indicators)))
+ stop("createFormula: NA found in indicators!")
+ # do the special case of no predictor columns, so use NULL model
+ if (sum(indicators) == 0)
+ return (formula(paste(target, " ~ 1", sep="")))
+  
+ # the more common case
+ result = formula(paste(target, " ~ ", paste(predictors[indicators == 1], collapse = " + ")))
+ return (result)
+}
+ 
+# the function to be optimised
+glmScore = function(indicators)
+{
+ if (is.null(indicators))
+ stop("glmScore: indicators is NULL!")
+ if (any(is.na(indicators)))
+ {
+ if (colin_verbose)
+ print("glmScore: NA found in indicators!")
+ }
+ 
+ # return a NULL model if any errors or warnings occur
+ fff = createFormula(indicators)
+ useMod = FALSE
+ glm.mod = NULL
+ tryCatch (
+ {
+ glm.mod = glm(fff, data = Coleman, family = binomial(link=logit));
+ useMod = TRUE;
+ }
+ ,
+ error = function(e) {
+ if (colin_verbose)
+ {
+ print(f2text(fff));
+ print(e);
+ }
+ },
+ warning = function(w) {
+ if (colin_verbose)
+ {
+ print(f2text(fff));
+ print(w);
+ }
+ }
+ )
+ if (! useMod) 
+ {
+ return (9e99)
+ }
+ # if there are problems with NA parameters (e.g. via separation), then use a NULL model
+ if (any(is.na(coef(glm.mod))))
+ {
+ if (colin_verbose)
+ print("NAs in coefficients")
+ return (9e99)
+ }
+ result = AIC(glm.mod)
+ return(result)
+}
+ 
+# create a version of GLM score that remembers previous results
+glmScr = memoise(glmScore)
+ 
+# define a glm fitness function
+glmFitness = function(x) return(-1 * glmScr(x))
+ 
+# custom function to create an initial population
+initPopn = function (object, ...) 
+{
+ population = matrix(0, nrow = object@popSize, ncol = object@nBits)
+ n = ncol(Coleman) - 1
+ probability = min(1, 2 / n)
+ ones = matrix(rbinom(n*object@popSize, 1, probability), object@popSize, n)
+ population[,seq_len(n)] = ones
+ # make the first n rows be the nth predictor
+ n2 = min(n, object@popSize)
+for (i in seq_len(n2)) {
+ population[i,] <- rep(0, times = object@nBits)
+ population[i, i] <- 1
+}
+ return(population)
+}
+ 
+# custom function to monitor the genetic algorithm
+glmMonitor = function (object, digits = getOption("digits"), ...) 
+{
+ fitness <- na.exclude(object@fitness)
+ i = which.max(fitness[! is.na(object@fitness)])
+ p = object@population[! is.na(object@fitness),]
+ x = p[i,]
+ cat(paste("Iter =", object@iter, " | Median =", 
+ format(-1 * median(fitness), digits = 0), 
+ " | Best =", 
+ format(-1 * max(fitness), digits = 0), 
+ f2text(createFormula(x)),
+ "\n"))
+}
+ 
+# run a genetic algorithm to find the "best" GLM with interaction terms
+forget(glmScr)
+colin_verbose = FALSE
+ga.mod.3 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors), 
+ population = initPopn, 
+ popSize = 500, 
+ parallel = TRUE, 
+ run = 25, 
+ monitor = glmMonitor, 
+ seed = 1)
+# run two more times to make sure randomness didn't limit the models considered
+ga.mod.4 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors),
+population = initPopn,
+popSize = 500,
+parallel = TRUE,
+run = 25,
+monitor = glmMonitor,
+seed = 2)
+ga.mod.5 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors),
+population = initPopn,
+popSize = 500,
+parallel = TRUE,
+run = 25,
+monitor = glmMonitor,
+seed = 3)
+```
+
+Now I will check which result was best.
+
+```{r}
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.3@solution)], collapse=" + "))
+test1 <- glm(x, Coleman, family = "binomial"); summary(test1)
+
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.4@solution)], collapse=" + "))
+test2 <- glm(x, Coleman, family = "binomial"); summary(test2)
+
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.5@solution)], collapse=" + "))
+test3 <- glm(x, Coleman, family = "binomial"); summary(test3)
+```
+
+The first result was best. Using the genetic algorithms we have a model using Health_Fctr and interactions between Income and na_count and between na_count and same, with an AIC = 215.2. Notably there is no separation or collinearity in this model.
+
+As compared to the best model glmulti would found with no interactions, this is worse. Let's look at a basic comparison of all the models.
+
+```{r}
+# reformat models as glm
+x <- paste("Response" ,"~", paste0(names(bestAIC$BestModel$model)[-1], collapse=" + "))
+test1 <- glm(x, Coleman, family = "binomial")
+test2 <- glm(bestAIC2@objects[[1]]$formula, Coleman, family = "binomial")
+test3 <- glm(bestAIC2@objects[[2]]$formula, Coleman, family = "binomial")
+test4 <- glm(bestAIC2@objects[[3]]$formula, Coleman, family = "binomial")
+test5 <- glm(bestAIC2@objects[[4]]$formula, Coleman, family = "binomial")
+test6 <- glm(bestAIC2@objects[[5]]$formula, Coleman, family = "binomial")
+test7 <- glm(glms@objects[[1]]$formula, Coleman, family = "binomial")
+test8 <- glm(glms@objects[[2]]$formula, Coleman, family = "binomial")
+test9 <- glm(glms@objects[[3]]$formula, Coleman, family = "binomial")
+test10 <- glm(glms@objects[[4]]$formula, Coleman, family = "binomial")
+test11 <- glm(glms@objects[[5]]$formula, Coleman, family = "binomial")
+test12 <- glm(bestAIC3@objects[[1]], Coleman, family = "binomial")
+test13 <- glm(bestAIC3@objects[[2]], Coleman, family = "binomial")
+test14 <- glm(bestAIC3@objects[[3]], Coleman, family = "binomial")
+test15 <- glm(bestAIC3@objects[[4]], Coleman, family = "binomial")
+test16 <- glm(bestAIC3@objects[[5]], Coleman, family = "binomial")
+test17 <- test
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.3@solution[1,])], collapse=" + "))
+test18 <- glm(x, Coleman, family = "binomial")
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.4@solution[1,])], collapse=" + "))
+test19 <- glm(x, Coleman, family = "binomial")
+```
+
+I will now look at the accuracy of the models using an ROC curve and choosing the best threshold.
+
+```{r}
+# baseline accuracy
+rowPerc(table(Coleman$Response))
+nrow(Coleman[Coleman$Response == "Yes",])/nrow(Coleman) # % of Coleman saying YES
+```
+
+Here I will try to automate the comparison of the models with ROC and AUC. The function here will find the best threshold for the model according to accuracy (total true pos + true neg divided by obs), outputting that accuracy level and the corresponding threshold, as well as the specificity and sensitivity (true pos/false neg + true pos) and (1 - specificity) (1 - true neg/(false pos + true neg).
+
+```{r}
+confusion_test <- function(c, Campus, predict){
+  table(Campus$Response, predict >= c)
+}
+
+accuracy <- function(x, Campus){
+  
+  if (x[1,1] + x[2,1] == nrow(Campus)) {
+     x[1,1]/nrow(Campus)
+  }else{
+    (x[1,1] + x[2,2])/nrow(Campus)
+  }
+}
+
+specificity <- function(x){
+  x[2,1]/(x[2,1] + x[1,1])
+}
+
+sensitivity <- function(x, Campus){
+  
+  if (x[1,1] + x[2,1] == nrow(Campus)) {
+    return(0)
+  }else{
+    x[2,2]/(x[1,2] + x[2,2])
+  }
+}
+
+compare_accuracy <- function(mod, Campus){
+  threshold <- 0.5
+  predict <- predict(mod, type="response")
+  confusion <- confusion_test(threshold, Campus, predict) # pick threshold c
+  accuracy <- accuracy(confusion, Campus)
+  false.pos.rt <- 1 - specificity(confusion)
+  true.pos.rt <- sensitivity(confusion, Campus)
+  
+  # concordance-index (discrimination)
+  predpr <- predict(mod, type = c("response"))
+  roccurve <- roc(Campus$Response ~ predpr)
+  auc <- auc(roccurve) # larger is better
+  
+  # Hosmer and Lemeshow test (calibration)
+  # larger p-value is better
+  if (mod$formula == "Response ~ 1") {
+    H.L <- NA
+  }else{
+    H.L <- logitgof(Campus$Response, fitted(mod))$p.value
+  }
+  result <- cbind(threshold, accuracy, false.pos.rt, true.pos.rt, auc, H.L)
+  return(result)
+}
+
+models <- list(test1, test2, test3, test4, test5, test6, test7, test8, test9, test10, test11, test12, test13, test14, test15, test16, test17, test18, test19)
+x <- as.data.frame(do_call_rbind(lapply(models, compare_accuracy, Campus = Coleman)))
+
+library(rcompanion)
+y <- compareGLM(test1, test2, test3, test4, test5, test6, test7, test8, test9, test10, test11, test12, test13, test14, test15, test16, test17, test18, test19)
+
+comparison <- cbind(x, y)
+
+# compare all models with DeLong's Test and select best models
+
+#load pROC
+library(pROC)
+
+tests <- c("test1", "test2", "test3", "test4", "test5", "test6", "test7", "test8", "test9", "test10", "test11", "test12", "test13", "test14", "test15", "test16", "test17", "test18", "test19")
+
+#create roc object for test1, test2, test3
+pred1 <- predict(test1, type="response")
+roc.out_test1 <- roc(Coleman$Response, pred1, plot=TRUE, smooth = FALSE)
+pred2 <- predict(test2, type="response")
+roc.out_test2 <- roc(Coleman$Response, pred2, plot=TRUE, smooth = FALSE)
+pred3 <- predict(test3, type="response")
+roc.out_test3 <- roc(Coleman$Response, pred3, plot=TRUE, smooth = FALSE)
+pred4 <- predict(test4, type="response")
+roc.out_test4 <- roc(Coleman$Response, pred4, plot=TRUE, smooth = FALSE)
+pred5 <- predict(test5, type="response")
+roc.out_test5 <- roc(Coleman$Response, pred5, plot=TRUE, smooth = FALSE)
+pred6 <- predict(test6, type="response")
+roc.out_test6 <- roc(Coleman$Response, pred6, plot=TRUE, smooth = FALSE)
+pred7 <- predict(test7, type="response")
+roc.out_test7 <- roc(Coleman$Response, pred7, plot=TRUE, smooth = FALSE)
+pred8 <- predict(test8, type="response")
+roc.out_test8 <- roc(Coleman$Response, pred8, plot=TRUE, smooth = FALSE)
+pred9 <- predict(test9, type="response")
+roc.out_test9 <- roc(Coleman$Response, pred9, plot=TRUE, smooth = FALSE)
+pred10 <- predict(test10, type="response")
+roc.out_test10 <- roc(Coleman$Response, pred10, plot=TRUE, smooth = FALSE)
+pred11 <- predict(test11, type="response")
+roc.out_test11 <- roc(Coleman$Response, pred11, plot=TRUE, smooth = FALSE)
+pred12 <- predict(test12, type="response")
+roc.out_test12 <- roc(Coleman$Response, pred12, plot=TRUE, smooth = FALSE)
+pred13 <- predict(test13, type="response")
+roc.out_test13 <- roc(Coleman$Response, pred13, plot=TRUE, smooth = FALSE)
+pred14 <- predict(test14, type="response")
+roc.out_test14 <- roc(Coleman$Response, pred14, plot=TRUE, smooth = FALSE)
+pred15 <- predict(test15, type="response")
+roc.out_test15 <- roc(Coleman$Response, pred15, plot=TRUE, smooth = FALSE)
+pred16 <- predict(test16, type="response")
+roc.out_test16 <- roc(Coleman$Response, pred16, plot=TRUE, smooth = FALSE)
+pred17 <- predict(test17, type="response")
+roc.out_test17 <- roc(Coleman$Response, pred17, plot=TRUE, smooth = FALSE)
+pred18 <- predict(test18, type="response")
+roc.out_test18 <- roc(Coleman$Response, pred18, plot=TRUE, smooth = FALSE)
+pred19 <- predict(test19, type="response")
+roc.out_test19 <- roc(Coleman$Response, pred19, plot=TRUE, smooth = FALSE)
+
+all_tests <- combn(
+  list(
+    "test1" = roc.out_test1,
+    "test2" = roc.out_test2,
+    "test3" = roc.out_test3,
+    "test4" = roc.out_test4,
+    "test5" = roc.out_test5,
+    "test6" = roc.out_test6,
+    "test7" = roc.out_test7,
+    "test8" = roc.out_test8,
+    "test9" = roc.out_test9,
+    "test10" = roc.out_test10,
+    "test11" = roc.out_test11,
+    "test12" = roc.out_test12,
+    "test13" = roc.out_test13,
+    "test14" = roc.out_test14,
+    "test15" = roc.out_test15,
+    "test16" = roc.out_test16,
+    "test17" = roc.out_test17,
+    "test18" = roc.out_test18,
+    "test19" = roc.out_test19
+  ),
+  FUN = function(x, ...) roc.test(x[[1]], x[[2]]),
+  m = 2,
+  simplify = FALSE, 
+  reuse.auc = TRUE, 
+  method = "delong", 
+  na.rm = TRUE
+)
+
+tests_names <- combn(
+  list("test1", "test2", "test3", "test4", "test5", "test6", "test7", "test8", "test9", "test10", "test11", "test12", "test13", "test14", "test15", "test16", "test17", "test18", "test19"), 
+  m = 2, 
+  FUN = paste, 
+  simplify = TRUE, 
+  collapse = "_"
+)
+all_tests <- setNames(all_tests, tests_names)
+
+test_results <- function(x) { # x is a vector length of names(all_tests)
+  
+  p <- all_tests[[x]]$p.value
+  aucs <- as.vector(all_tests[[x]]$estimate)
+  if (p < 0.05) {
+    
+    if (aucs[1] > aucs[2]) {
+      
+      return(gsub("_test[0-9]+", "", tests_names[x]))
+      
+    }else{
+      
+      return(gsub("test[0-9]+_", "", tests_names[x]))
+      
+    }
+    
+  }else{
+    return(FALSE)
+  }
+}
+
+ranks <- sapply(1:length(names(all_tests)), test_results)
+x <- cbind(names(all_tests), ranks)
+
+rank_tests <- function(x, results){ # x is a vector length of names(all_tests)
+  
+  a <- as.vector(results[x,])
+  
+  if (a[2] == "FALSE") {
+    return(NULL)
+  }else{
+    return(gsub("_", "", gsub(a[2], "", a[1])))
+  }
+}
+
+best.auc <- comparison[! tests %in% unique(unlist(sapply(1:length(names(all_tests)), rank_tests, results = x))),]
+
+# automatically select model with best H-L result
+H.L1 <- comparison %>% pull(H.L)
+H.L <- H.L1[!is.na(H.L1)]
+best.H.L <- comparison[max(H.L) == H.L1,]
+best.H.L <- best.H.L %>% remove_missing()
+
+# bind with best auc
+best <- rbind(best.auc, best.H.L)
+unique(best) ## BEST MODELS ##
+```
+
+
+```{r}
+ColemanModels_filtered <- unique(best) ## BEST MODELS ##
+ColemanModels <- comparison
+```
+
+# Shillman
+
+```{r}
+# filter dataset by campus #
+campus_filter <- function(campus){ # name of campus
+  
+  loc <- filter(df, Campus == campus)
+  loc$Campus <- NULL
+  loc$response <- NULL
+  loc$unknowns <- NULL # according to GBM and nearZeroVar
+  loc <- remove_missing(loc) # only 6 rows of Shillman
+  
+  values <- as.matrix(sapply(loc, function(x) length(unique(x))))
+  
+  if (values[1,1] == 1) { # if ALL Response are YESs or NOs
+    
+    print("Unanimous Response")
+    
+  }else{
+    
+    if (sum(values[,1] == 1) >= 1) { # if any vars have only one unique value
+      
+      delete <- rownames(values)[values[,1] == 1] # list of homogeneous vars
+      x <- colnames(loc)[!colnames(loc) %in% c(delete)] # remove vars from list of vars
+      loc %>% dplyr::select(x)
+      
+    }else{
+      
+      return(loc)
+      
+    }
+  }
+}
+```
+
+First I will look at the relative importance of predictors using GBM.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(gbm)
+
+# reformat data
+Shillman <- filter(df, Campus == "Shillman")
+Shillman$Campus <- NULL
+Shillman$Response <- NULL
+# gbm requires y coded as 0/1 integer
+Shillman$response <- as.integer(as.character(Shillman$response))
+
+# GBM variable importance
+set.seed(1)
+gbm_imp = gbm(formula = response ~ ., distribution = "bernoulli", data = Shillman, n.trees = 1000, interaction.depth = 1, verbose=TRUE, shrinkage = 0.01, cv.folds=0, keep.data = F)
+s = summary(gbm_imp)
+head(s)
+s
+```
+
+According to the GBM model, Drives and unknowns are the variables of no importance. Age, Health_Fctr, Income, Birthplace, same, and na_count are most important. According to nearZeroVar, unknowns and Birthplace are insignificant. Because the two test agree unknowns is unimportant, I will remove it. 
+
+Next I will look at the model given by bestglm.
+
+```{r}
+# reformat data
+Shillman <- df %>% filter(Campus == "Shillman")
+Shillman <- within(Shillman, { # y must be last var
+    response  <- NULL        # Delete
+    Campus <- NULL
+    unknowns <- NULL
+    y <- Response         # into y
+    Response  <- NULL        # Delete 
+})
+
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(bestglm)
+
+ # find the model with the best AIC
+bestAIC = bestglm(Shillman, family = binomial, IC = "AIC")
+ 
+# Show top 5 models
+bestAIC$BestModels
+ 
+# show a summary of the best model
+summary(bestAIC$BestModel)
+# show the relationship between the number of predictors and the model quality
+plot(seq_len(nrow(bestAIC$Subsets)) - 1, bestAIC$Subsets[,"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+ 
+# show again, but cap it at 4 predictors
+plot(seq_len(5) - 1, bestAIC$Subsets[seq_len(5),"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+
+# show again, but cap it at 9 predictors
+plot(seq_len(9) - 1, bestAIC$Subsets[seq_len(9),"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+```
+
+Age and Frailty are in every model while Working, Living, Drives, Income, Birthplace, and Lang are in none. The best model using bestglm uses Age, Frailty, and same with an AIC = 136.74. AIC is lowest with only three terms. (Using BIC, the best model has only an intercept). Notably, bestglm does not consider interaction terms. 
+
+Next I will look at the models given by glmulti.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Shillman <- campus_filter("Shillman")
+
+# replicate the analysis done by bestglm using AIC
+bestAIC2 = glmulti(Response ~ ., data = Shillman, family = binomial, level = 1, crit=aic, fitfunc=glm, method="h",
+confsetsize = 256, plotty = F, report = F)
+ 
+print(bestAIC2)
+bestAIC2@formulas[1:5]
+```
+
+Using BIC, glmulti would say the model with only an intercept is the best. This isn't true, so I will use AIC. The best model it gives has an AIC of 125.66 with the predictors Living, Health_Fctr, Drives, Age, Frailty, and na_count. Again, glmulti does not consider interactions.
+
+Next I will test glmulti allowing it to look for interaction terms, but for the sake of time I will limit the variables under consideration to the top six found by the GBM. The dataset is the same.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Shillman <- campus_filter("Shillman")
+
+# allow for 2-way interactions
+bestAIC3 = glmulti(Response ~ Age + Health_Fctr + Income + Birthplace + same + na_count, data = Shillman, family = binomial, level = 2, crit=aic, fitfunc=glm, method="g", confsetsize = 256, plotty = F, report = F)
+
+print(bestAIC3)
+bestAIC3@formulas[1:5]
+bestAIC3@objects[[2]]
+```
+
+Using BIC, glmulti would say the model with only an intercept is the best. Using AIC and limiting the predictors considered to the top ones found by the GBM, the best model has an AIC of 115.98 (better than before) with predictors Age, Income, and na_count, and interactions btwn Health_Fctr and Age, Health_Fctr and Income, Health_Fctr and na_count, same and Age, same and Income, and same and na_Count. The second best model (AIC = 116) is the same but doesn't have the interaction between Health_Fctr and Age.
+
+There are many limitations to glmulti, so I will use these following techniques to see if it's possible to improve on automatic model selection.
+
+First off, since I keep running into separation with the models. There doesn't seem to be a reason for perfect separation, so I will try to prevent it.
+
+```{r}
+# expand a dot formula to show all of the terms
+expandDotFormula = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+ # allow for dot-style formula
+ if (gsub("()", "", f[3], fixed=TRUE) == ".")
+ {
+ nm = names(dat)
+ nm = nm[nm != target]
+ fAdj = formula(paste(target, " ~ ", paste(nm, collapse=" + "), sep=""))
+ }
+ return (fAdj)
+}
+ 
+# test whether a specific term in a formula will cause separation
+termHasSeparation = function(target, predictor, dat)
+{
+ cols = unlist(strsplit(predictor, ":"))
+ isFactor = sapply(cols, function(x) class(dat[,x]) == "character" || class(dat[,x]) == "factor")
+ if (sum(isFactor) == 0) {
+   return (FALSE)
+ }else{ # check whether there are cells in which there are all zeroes
+   fff <- formula(paste(" ~ ", target, " + ", paste(cols[isFactor], collapse=" + "), sep = ""))
+   if (sum(xtabs(fff, data = dat) == 0) > 0) {
+     return (TRUE)
+   }else{ # check whether there are cells in which there are all ones
+     if (sum(xtabs(fff, data = dat) == 1) > 0) {
+       return (TRUE)
+     }else{ # check whether there are cells with no exposure
+       nPossibleCells = prod(sapply(cols[isFactor], function(x) length(unique(dat[,x]))))
+       nActualCells = prod(dim(xtabs(fff, data = dat)))
+       if (nActualCells < nPossibleCells) {
+         return (TRUE)
+       }else{
+         return (FALSE)
+       }
+     }
+   }
+ }
+}
+# test whether a formula will cause separation
+fHasSeparation = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+  
+ ff <- expandDotFormula(f, dat)
+ tt <- terms(ff)
+ ttf <- attr(tt, "factors")
+  
+ # ttf has columns that represent individual terms of the formula
+ fTerms <- colnames(ttf)
+ # check each term whether it exhibits separation
+ reject <- any(sapply(fTerms, function(x) termHasSeparation(target, x, dat)))
+  
+ return (reject)
+}
+ 
+# this function returns a NULL model if the formula causes separation
+noSeparationGLM = function(f, data){
+  
+ if (fHasSeparation(f, data)) {
+    target = gsub("()", "", f[2], fixed=TRUE)
+    a = formula(paste(target, " ~ 1", sep=""))
+    return (glm(a, data = data, family = binomial(link=logit)))
+ }else{
+   
+ return (glm(f, data = data, family = binomial(link=logit)))
+   
+ }
+}
+```
+
+```{r} 
+# test some formulae
+fHasSeparation(Response ~ 1, Shillman)
+fHasSeparation(Response ~ 1 + Living + Health_Fctr + Drives + Age + Frailty + 
+    na_count, Shillman)
+fHasSeparation(Response ~ 1 + Age + Frailty + same, Shillman)
+fHasSeparation(Response ~ 1 + Age + Income + na_count + Health_Fctr:Age + Health_Fctr:Income + 
+    Health_Fctr:na_count + same:Age + same:Income + same:na_count, Shillman)
+ 
+# test some GLMs
+noSeparationGLM(Response ~ 1, Shillman)
+noSeparationGLM(Response ~ 1 + Living + Health_Fctr + Drives + Age + Frailty + 
+    na_count, Shillman)
+noSeparationGLM(Response ~ 1 + Age + Frailty + same, Shillman)
+noSeparationGLM(Response ~ 1 + Age + Income + na_count + Health_Fctr:Age + Health_Fctr:Income + 
+    Health_Fctr:na_count + same:Age + same:Income + same:na_count, Shillman)
+```
+
+Only the first model doesn't have separation.
+
+Here are the variables and interactions that cause separation.
+
+```{r}
+# list the columns that cause separation
+names(Shillman[,-1])[sapply(names(Shillman[,-1]), function(x) termHasSeparation("Response", x, Shillman))]
+ 
+# list the pairs of columns that cause separation
+colPairs = expand.grid(names(Shillman[,-1]), names(Shillman[,-1]))
+colPairs = colPairs[apply(colPairs, 1, function(x) x[1] != x[2]),]
+combinations = apply(colPairs, 1, function(x) paste(x, collapse=":"))
+combinations[sapply(combinations, function(x) termHasSeparation("Response", x, Shillman))]
+```
+
+I will now try to use glmulti but reject models that have separation.
+
+```{r}
+# fit a GLM allowing that possible models will be rejected due to separation
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+
+# read the training data
+Shillman <- campus_filter("Shillman")
+ 
+glms = glmulti(Response ~ ., data = Shillman, level = 1, method="g", fitfunc = noSeparationGLM, confsetsize = 256, plotty = F, report = F)
+ 
+# show the result - note the absence of columns that cause separation
+ 
+summary(glms)$bestmodel
+print(glms)
+```
+
+This results is a model with same, Age, and Frailty as a predictor and an AIC of 133.57. This is without considering interactions.
+
+I will try to do this again but also consider interactions, by using custom genetic algorithms.
+
+```{r}
+# a function to create GLM formulae from an indicator vector
+createFormula = function(indicators)
+{
+ # do the special case of no predictor columns, so use NULL model
+ if (sum(indicators) == 0)
+ return (formula(paste(target, " ~ 1", sep="")))
+  
+ # the more common case
+ return (formula(paste(target, " ~ ", paste(predictors[indicators == 1], collapse = " + "))))
+}
+
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(memoise)
+ 
+# read the training data
+Shillman <- campus_filter("Shillman")
+
+# the function to be optimised
+glmScore = function(indicators)
+{
+ # return a NULL model if any errors or warnings occur
+ glm.mod = tryCatch (
+ glm(createFormula(indicators), data = Shillman, family = binomial(link=logit)),
+ error = function(e) glm(createFormula(indicators * 0), data = Shillman, family = binomial(link=logit)),
+ warning = function(w) glm(createFormula(indicators * 0), data = Shillman, family = binomial(link=logit))
+ )
+ # if there are problems with NA parameters (e.g. via separation), then use a NULL model
+ if (any(is.na(coef(glm.mod))))
+ glm.mod = glm(createFormula(indicators * 0), data = Shillman, family = binomial(link=logit))
+ print(glm.mod$formula)
+ return(AIC(glm.mod))
+}
+ 
+glmScr = memoise(glmScore)
+
+# a vector of names of predictor columns
+target = "Response"
+predictors = names(Shillman)
+predictors = predictors[predictors != target]
+indices = expand.grid(seq_len(length(predictors)), seq_len(length(predictors)))
+indices = indices[indices[,1] != indices[,2],]
+twoWays = apply(indices, 1, function(x) paste(predictors[x], collapse = ":"))
+predictors = c(predictors, twoWays)
+length(predictors)
+```
+
+There are 121 possible predictors, so 2^121 possible formulae.
+
+```{r}
+# custom function to create an initial population
+initPopn = function (object, ...) 
+{
+ population = matrix(0, nrow = object@popSize, ncol = object@nBits)
+ n = ncol(Shillman) - 1
+ probability = min(1, 2 / n)
+ ones = matrix(rbinom(n * object@popSize, 1, probability), object@popSize, n)
+ population[,seq_len(n)] = ones
+ return(population)
+}
+ 
+set.seed(1)
+ 
+ga.mod.2 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors), population = initPopn, popSize = 100, parallel = TRUE, run = 5)
+```
+
+```{r}
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.2@solution)], collapse=" + "))
+test <- glm(x, Shillman, family = "binomial"); summary(test)
+```
+
+The best model this gives uses the terms Age, Lang, and the interaction between Income and Frailty, with an AIC of 125.61. This is better than what was found by glmulti.
+
+Now I will do this one more time and also consider interactions.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(memoise, caret, GA)
+ 
+# function to show a formula as text
+f2text = function(f)
+{
+ if (class(f) != "formula")
+ stop("f is not a formula!")
+ return(paste(as.character(f)[c(2,1,3)], sep = "", collapse = " "))
+}
+ 
+# read the training data
+Shillman <- campus_filter("Shillman")
+ 
+# a vector of names of predictor columns
+target = "Response"
+predictors = names(Shillman)
+predictors = predictors[predictors != target]
+indices = expand.grid(seq_len(length(predictors)), seq_len(length(predictors)))
+indices = indices[indices[,1] < indices[,2],]
+twoWays = apply(indices, 1, function(x) paste(predictors[x], collapse = ":"))
+predictors = c(predictors, twoWays)
+length(predictors)
+ 
+# a function to create GLM formulae from an indicator vector
+createFormula = function(indicators)
+{
+ if (is.null(indicators))
+ stop("createFormula: indicators is NULL!")
+ if (any(is.na(indicators)))
+ stop("createFormula: NA found in indicators!")
+ # do the special case of no predictor columns, so use NULL model
+ if (sum(indicators) == 0)
+ return (formula(paste(target, " ~ 1", sep="")))
+  
+ # the more common case
+ result = formula(paste(target, " ~ ", paste(predictors[indicators == 1], collapse = " + ")))
+ return (result)
+}
+ 
+# the function to be optimised
+glmScore = function(indicators)
+{
+ if (is.null(indicators))
+ stop("glmScore: indicators is NULL!")
+ if (any(is.na(indicators)))
+ {
+ if (colin_verbose)
+ print("glmScore: NA found in indicators!")
+ }
+ 
+ # return a NULL model if any errors or warnings occur
+ fff = createFormula(indicators)
+ useMod = FALSE
+ glm.mod = NULL
+ tryCatch (
+ {
+ glm.mod = glm(fff, data = Shillman, family = binomial(link=logit));
+ useMod = TRUE;
+ }
+ ,
+ error = function(e) {
+ if (colin_verbose)
+ {
+ print(f2text(fff));
+ print(e);
+ }
+ },
+ warning = function(w) {
+ if (colin_verbose)
+ {
+ print(f2text(fff));
+ print(w);
+ }
+ }
+ )
+ if (! useMod) 
+ {
+ return (9e99)
+ }
+ # if there are problems with NA parameters (e.g. via separation), then use a NULL model
+ if (any(is.na(coef(glm.mod))))
+ {
+ if (colin_verbose)
+ print("NAs in coefficients")
+ return (9e99)
+ }
+ result = AIC(glm.mod)
+ return(result)
+}
+ 
+# create a version of GLM score that remembers previous results
+glmScr = memoise(glmScore)
+ 
+# define a glm fitness function
+glmFitness = function(x) return(-1 * glmScr(x))
+ 
+# custom function to create an initial population
+initPopn = function (object, ...) 
+{
+ population = matrix(0, nrow = object@popSize, ncol = object@nBits)
+ n = ncol(Shillman) - 1
+ probability = min(1, 2 / n)
+ ones = matrix(rbinom(n*object@popSize, 1, probability), object@popSize, n)
+ population[,seq_len(n)] = ones
+ # make the first n rows be the nth predictor
+ n2 = min(n, object@popSize)
+for (i in seq_len(n2)) {
+ population[i,] <- rep(0, times = object@nBits)
+ population[i, i] <- 1
+}
+ return(population)
+}
+ 
+# custom function to monitor the genetic algorithm
+glmMonitor = function (object, digits = getOption("digits"), ...) 
+{
+ fitness <- na.exclude(object@fitness)
+ i = which.max(fitness[! is.na(object@fitness)])
+ p = object@population[! is.na(object@fitness),]
+ x = p[i,]
+ cat(paste("Iter =", object@iter, " | Median =", 
+ format(-1 * median(fitness), digits = 0), 
+ " | Best =", 
+ format(-1 * max(fitness), digits = 0), 
+ f2text(createFormula(x)),
+ "\n"))
+}
+ 
+# run a genetic algorithm to find the "best" GLM with interaction terms
+forget(glmScr)
+colin_verbose = FALSE
+ga.mod.3 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors), 
+ population = initPopn, 
+ popSize = 500, 
+ parallel = TRUE, 
+ run = 25, 
+ monitor = glmMonitor, 
+ seed = 1)
+# run two more times to make sure randomness didn't limit the models considered
+ga.mod.4 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors),
+population = initPopn,
+popSize = 500,
+parallel = TRUE,
+run = 25,
+monitor = glmMonitor,
+seed = 2)
+ga.mod.5 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors),
+population = initPopn,
+popSize = 500,
+parallel = TRUE,
+run = 25,
+monitor = glmMonitor,
+seed = 3)
+```
+
+Now I will check which result was best.
+
+```{r}
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.3@solution)], collapse=" + "))
+test1 <- glm(x, Shillman, family = "binomial"); summary(test1)
+
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.4@solution)], collapse=" + "))
+test2 <- glm(x, Shillman, family = "binomial"); summary(test2)
+
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.5@solution)], collapse=" + "))
+test3 <- glm(x, Shillman, family = "binomial"); summary(test3)
+```
+
+The first result was best (they're all the same). Using the genetic algorithms we have a model using Frailty and interactions between Frailty and Income, Income and Drives, and between Frailty and same, with an AIC = 154.5. Notably there is no separation or collinearity in this model.
+
+Let's look at a basic comparison of all the models.
+
+```{r}
+# reformat models as glm
+x <- paste("Response" ,"~", paste0(names(bestAIC$BestModel$model)[-1], collapse=" + "))
+test1 <- glm(x, Shillman, family = "binomial")
+test2 <- glm(bestAIC2@objects[[1]]$formula, Shillman, family = "binomial")
+test3 <- glm(bestAIC2@objects[[2]]$formula, Shillman, family = "binomial")
+test4 <- glm(bestAIC2@objects[[3]]$formula, Shillman, family = "binomial")
+test5 <- glm(bestAIC2@objects[[4]]$formula, Shillman, family = "binomial")
+test6 <- glm(bestAIC2@objects[[5]]$formula, Shillman, family = "binomial")
+test7 <- glm(glms@objects[[1]]$formula, Shillman, family = "binomial")
+test8 <- glm(glms@objects[[2]]$formula, Shillman, family = "binomial")
+test9 <- glm(glms@objects[[3]]$formula, Shillman, family = "binomial")
+test10 <- glm(glms@objects[[4]]$formula, Shillman, family = "binomial")
+test11 <- glm(glms@objects[[5]]$formula, Shillman, family = "binomial")
+test12 <- glm(bestAIC3@objects[[1]], Shillman, family = "binomial")
+test13 <- glm(bestAIC3@objects[[2]], Shillman, family = "binomial")
+test14 <- glm(bestAIC3@objects[[3]], Shillman, family = "binomial")
+test15 <- glm(bestAIC3@objects[[4]], Shillman, family = "binomial")
+test16 <- glm(bestAIC3@objects[[5]], Shillman, family = "binomial")
+test17 <- test
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.3@solution[1,])], collapse=" + "))
+test18 <- glm(x, Shillman, family = "binomial")
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.4@solution[1,])], collapse=" + "))
+test19 <- glm(x, Shillman, family = "binomial")
+```
+
+I will now look at the accuracy of the models using an ROC curve and choosing the best threshold.
+
+```{r}
+# baseline accuracy
+rowPerc(table(Shillman$Response))
+nrow(Shillman[Shillman$Response == "Yes",])/nrow(Shillman) # % of Shillman saying YES
+```
+
+Here I will try to automate the comparison of the models with ROC and AUC. The function here will find the best threshold for the model according to accuracy (total true pos + true neg divided by obs), outputting that accuracy level and the corresponding threshold, as well as the specificity and sensitivity (true pos/false neg + true pos) and (1 - specificity) (1 - true neg/(false pos + true neg).
+
+```{r}
+confusion_test <- function(c, Campus, predict){
+  table(Campus$Response, predict >= c)
+}
+
+accuracy <- function(x, Campus){
+  
+  if (x[1,1] + x[2,1] == nrow(Campus)) {
+     x[1,1]/nrow(Campus)
+  }else{
+    (x[1,1] + x[2,2])/nrow(Campus)
+  }
+}
+
+specificity <- function(x){
+  x[2,1]/(x[2,1] + x[1,1])
+}
+
+sensitivity <- function(x, Campus){
+  
+  if (x[1,1] + x[2,1] == nrow(Campus)) {
+    return(0)
+  }else{
+    x[2,2]/(x[1,2] + x[2,2])
+  }
+}
+
+compare_accuracy <- function(mod, Campus){
+  threshold <- 0.5
+  predict <- predict(mod, type="response")
+  confusion <- confusion_test(threshold, Campus, predict) # pick threshold c
+  accuracy <- accuracy(confusion, Campus)
+  false.pos.rt <- 1 - specificity(confusion)
+  true.pos.rt <- sensitivity(confusion, Campus)
+  
+  # concordance-index (discrimination)
+  predpr <- predict(mod, type = c("response"))
+  roccurve <- roc(Campus$Response ~ predpr)
+  auc <- auc(roccurve) # larger is better
+  
+  # Hosmer and Lemeshow test (calibration)
+  # larger p-value is better
+  if (mod$formula == "Response ~ 1") {
+    H.L <- NA
+  }else{
+    H.L <- logitgof(Campus$Response, fitted(mod))$p.value
+  }
+  result <- cbind(threshold, accuracy, false.pos.rt, true.pos.rt, auc, H.L)
+  return(result)
+}
+
+models <- list(test1, test2, test3, test4, test5, test6, test7, test8, test9, test10, test11, test12, test13, test14, test15, test16, test17, test18, test19)
+x <- as.data.frame(do_call_rbind(lapply(models, compare_accuracy, Campus = Shillman)))
+
+library(rcompanion)
+y <- compareGLM(test1, test2, test3, test4, test5, test6, test7, test8, test9, test10, test11, test12, test13, test14, test15, test16, test17, test18, test19)
+
+comparison <- cbind(x, y)
+
+# compare all models with DeLong's Test and select best models
+
+#load pROC
+library(pROC)
+
+tests <- c("test1", "test2", "test3", "test4", "test5", "test6", "test7", "test8", "test9", "test10", "test11", "test12", "test13", "test14", "test15", "test16", "test17", "test18", "test19")
+
+#create roc object for test1, test2, test3
+pred1 <- predict(test1, type="response")
+roc.out_test1 <- roc(Shillman$Response, pred1, plot=TRUE, smooth = FALSE)
+pred2 <- predict(test2, type="response")
+roc.out_test2 <- roc(Shillman$Response, pred2, plot=TRUE, smooth = FALSE)
+pred3 <- predict(test3, type="response")
+roc.out_test3 <- roc(Shillman$Response, pred3, plot=TRUE, smooth = FALSE)
+pred4 <- predict(test4, type="response")
+roc.out_test4 <- roc(Shillman$Response, pred4, plot=TRUE, smooth = FALSE)
+pred5 <- predict(test5, type="response")
+roc.out_test5 <- roc(Shillman$Response, pred5, plot=TRUE, smooth = FALSE)
+pred6 <- predict(test6, type="response")
+roc.out_test6 <- roc(Shillman$Response, pred6, plot=TRUE, smooth = FALSE)
+pred7 <- predict(test7, type="response")
+roc.out_test7 <- roc(Shillman$Response, pred7, plot=TRUE, smooth = FALSE)
+pred8 <- predict(test8, type="response")
+roc.out_test8 <- roc(Shillman$Response, pred8, plot=TRUE, smooth = FALSE)
+pred9 <- predict(test9, type="response")
+roc.out_test9 <- roc(Shillman$Response, pred9, plot=TRUE, smooth = FALSE)
+pred10 <- predict(test10, type="response")
+roc.out_test10 <- roc(Shillman$Response, pred10, plot=TRUE, smooth = FALSE)
+pred11 <- predict(test11, type="response")
+roc.out_test11 <- roc(Shillman$Response, pred11, plot=TRUE, smooth = FALSE)
+pred12 <- predict(test12, type="response")
+roc.out_test12 <- roc(Shillman$Response, pred12, plot=TRUE, smooth = FALSE)
+pred13 <- predict(test13, type="response")
+roc.out_test13 <- roc(Shillman$Response, pred13, plot=TRUE, smooth = FALSE)
+pred14 <- predict(test14, type="response")
+roc.out_test14 <- roc(Shillman$Response, pred14, plot=TRUE, smooth = FALSE)
+pred15 <- predict(test15, type="response")
+roc.out_test15 <- roc(Shillman$Response, pred15, plot=TRUE, smooth = FALSE)
+pred16 <- predict(test16, type="response")
+roc.out_test16 <- roc(Shillman$Response, pred16, plot=TRUE, smooth = FALSE)
+pred17 <- predict(test17, type="response")
+roc.out_test17 <- roc(Shillman$Response, pred17, plot=TRUE, smooth = FALSE)
+pred18 <- predict(test18, type="response")
+roc.out_test18 <- roc(Shillman$Response, pred18, plot=TRUE, smooth = FALSE)
+pred19 <- predict(test19, type="response")
+roc.out_test19 <- roc(Shillman$Response, pred19, plot=TRUE, smooth = FALSE)
+
+all_tests <- combn(
+  list(
+    "test1" = roc.out_test1,
+    "test2" = roc.out_test2,
+    "test3" = roc.out_test3,
+    "test4" = roc.out_test4,
+    "test5" = roc.out_test5,
+    "test6" = roc.out_test6,
+    "test7" = roc.out_test7,
+    "test8" = roc.out_test8,
+    "test9" = roc.out_test9,
+    "test10" = roc.out_test10,
+    "test11" = roc.out_test11,
+    "test12" = roc.out_test12,
+    "test13" = roc.out_test13,
+    "test14" = roc.out_test14,
+    "test15" = roc.out_test15,
+    "test16" = roc.out_test16,
+    "test17" = roc.out_test17,
+    "test18" = roc.out_test18,
+    "test19" = roc.out_test19
+  ),
+  FUN = function(x, ...) roc.test(x[[1]], x[[2]]),
+  m = 2,
+  simplify = FALSE, 
+  reuse.auc = TRUE, 
+  method = "delong", 
+  na.rm = TRUE
+)
+
+tests_names <- combn(
+  list("test1", "test2", "test3", "test4", "test5", "test6", "test7", "test8", "test9", "test10", "test11", "test12", "test13", "test14", "test15", "test16", "test17", "test18", "test19"), 
+  m = 2, 
+  FUN = paste, 
+  simplify = TRUE, 
+  collapse = "_"
+)
+all_tests <- setNames(all_tests, tests_names)
+
+test_results <- function(x) { # x is a vector length of names(all_tests)
+  
+  p <- all_tests[[x]]$p.value
+  aucs <- as.vector(all_tests[[x]]$estimate)
+  if (p < 0.05) {
+    
+    if (aucs[1] > aucs[2]) {
+      
+      return(gsub("_test[0-9]+", "", tests_names[x]))
+      
+    }else{
+      
+      return(gsub("test[0-9]+_", "", tests_names[x]))
+      
+    }
+    
+  }else{
+    return(FALSE)
+  }
+}
+
+ranks <- sapply(1:length(names(all_tests)), test_results)
+x <- cbind(names(all_tests), ranks)
+
+rank_tests <- function(x, results){ # x is a vector length of names(all_tests)
+  
+  a <- as.vector(results[x,])
+  
+  if (a[2] == "FALSE") {
+    return(NULL)
+  }else{
+    return(gsub("_", "", gsub(a[2], "", a[1])))
+  }
+}
+
+best.auc <- comparison[! tests %in% unique(unlist(sapply(1:length(names(all_tests)), rank_tests, results = x))),]
+
+# automatically select model with best H-L result
+H.L1 <- comparison %>% pull(H.L)
+H.L <- H.L1[!is.na(H.L1)]
+best.H.L <- comparison[max(H.L) == H.L1,]
+best.H.L <- best.H.L %>% remove_missing()
+
+# bind with best auc
+best <- rbind(best.auc, best.H.L)
+unique(best) ## BEST MODELS ##
+```
+
+The best models are test3 and test4. test4 was found using glmulti limited to the 6 most important terms according to the GBM, considering interaction terms. It is likely overfit given the high false positive rate, whereas test3 is more reasonable, although the discrimination and accuracy are far worse.
+
+```{r}
+ShillmanModels_filtered <- unique(best) ## BEST MODELS ##
+ShillmanModels <- comparison
+```
+
+```{r}
+comparison
+
+predict <- predict(test5, type="response")
+ROCRpred <- prediction(predict, Shillman$Response)
+ROCRperf <- performance(ROCRpred, "tpr", "fpr")
+plot(ROCRperf, colorize=TRUE, print.cutoffs.at=seq(0,1,by=0.05), text.adj=c(-0.2,1.7))
+```
+
+After some manual inspection, test5 is actually a very good model as well, considering the high accuracy, high true positive rate compared to false positives, AUC, and it also has the lowest AICc. So the best model is probably actually between test3 and test5.
+
+# Brown
+
+```{r}
+# Brown dataset
+## INSTEAD OF REMOVING 44 ROWS W MISSING VALUES, I WILL REMOVE 'BIRTHPLACE' ##
+Brown <- filter(df, Campus == "Brown Family")
+Brown$Birthplace <- NULL
+Brown$Campus <- NULL
+Brown$response <- NULL
+Brown
+```
+
+First I will look at the relative importance of predictors using GBM.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(gbm)
+
+# reformat data
+Brown <- filter(df, Campus == "Brown Family")
+Brown$Birthplace <- NULL
+Brown$Campus <- NULL
+Brown$Response <- NULL
+# gbm requires y coded as 0/1 integer
+Brown$response <- as.integer(as.character(Brown$response))
+
+# GBM variable importance
+set.seed(1)
+gbm_imp = gbm(formula = response ~ ., distribution = "bernoulli", data = Brown, n.trees = 1000, interaction.depth = 1, verbose=TRUE, shrinkage = 0.01, cv.folds=0, keep.data = F)
+s = summary(gbm_imp)
+head(s)
+s
+```
+
+According to the GBM model, Drives and Livings are the variables of no importance. Age, Health_Fctr, Income, na_count, Lang, and same are most important. However, I will not remove any variables from consdiration.
+
+Next I will look at the model given by bestglm.
+
+```{r}
+# reformat data
+Brown <- df %>% filter(Campus == "Brown Family")
+Brown <- within(Brown, { # y must be last var
+    response  <- NULL        # Delete
+    Campus <- NULL
+    Birthplace <- NULL
+    y <- Response         # into y
+    Response  <- NULL        # Delete 
+})
+
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(bestglm)
+
+ # find the model with the best AIC
+bestAIC = bestglm(Brown, family = binomial, IC = "AIC")
+ 
+# Show top 5 models
+bestAIC$BestModels
+ 
+# show a summary of the best model
+summary(bestAIC$BestModel)
+# show the relationship between the number of predictors and the model quality
+plot(seq_len(nrow(bestAIC$Subsets)) - 1, bestAIC$Subsets[,"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+ 
+# show again, but cap it at 4 predictors
+plot(seq_len(5) - 1, bestAIC$Subsets[seq_len(5),"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+```
+
+According to model selection with bestglm using AIC, the best model has only an intercept with an AIC of 64.59. Graphing the models shows that having 0 predictors gives the lowest AIC. (Using BIC, the best model has only an intercept). Notably, bestglm does not consider interaction terms. 
+
+Next I will look at the models given by glmulti.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Brown <- filter(df, Campus == "Brown Family")
+Brown$Birthplace <- NULL
+Brown$Campus <- NULL
+Brown$response <- NULL
+
+# replicate the analysis done by bestglm using AIC
+bestAIC2 = glmulti(Response ~ ., data = Brown, family = binomial, level = 1, crit=aic, fitfunc=glm, method="h",
+confsetsize = 256, plotty = F, report = F)
+ 
+print(bestAIC2)
+```
+
+Interestingly, the best model it gives has an AIC is the same as bestglm.
+
+Next I will test glmulti allowing it to look for interaction terms, but for the sake of time I will limit the variables under consideration to the top six found by the GBM. The dataset is the same.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+ 
+# read the training data
+Brown <- filter(df, Campus == "Brown Family")
+Brown$Birthplace <- NULL
+Brown$Campus <- NULL
+Brown$response <- NULL
+
+# allow for 2-way interactions
+bestAIC3 = glmulti(Response ~ Age + Health_Fctr + Income + na_count + Lang + same, data = Brown, family = binomial, level = 2, crit=aic, fitfunc=glm, method="g", confsetsize = 256, plotty = F, report = F)
+
+print(bestAIC3)
+bestAIC3@formulas[1:5]
+```
+
+Using AIC and limiting the predictors considered to the ones found to the most important according to the GBM, the best model has an AIC of 52.35 (better than before) with predictors Health_Fctr, Age, Income, na_count, and interactions btwn Age and na_count, Health_Fctr and Age, Lang and Income, same and Income, and same and na_count. The second best model (AIC = 52.35) instead of an interaction between same and Income includes the predictor same.
+
+There are many limitations to glmulti, so I will use these following techniques to see if it's possible to improve on automatic model selection.
+
+First off, since I keep running into separation with the models. There doesn't seem to be a reason for perfect separation, so I will try to prevent it.
+
+```{r}
+# expand a dot formula to show all of the terms
+expandDotFormula = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+ # allow for dot-style formula
+ if (gsub("()", "", f[3], fixed=TRUE) == ".")
+ {
+ nm = names(dat)
+ nm = nm[nm != target]
+ fAdj = formula(paste(target, " ~ ", paste(nm, collapse=" + "), sep=""))
+ }
+ return (fAdj)
+}
+ 
+# test whether a specific term in a formula will cause separation
+termHasSeparation = function(target, predictor, dat)
+{
+ cols = unlist(strsplit(predictor, ":"))
+ isFactor = sapply(cols, function(x) class(dat[,x]) == "character" || class(dat[,x]) == "factor")
+ if (sum(isFactor) == 0) {
+   return (FALSE)
+ }else{ # check whether there are cells in which there are all zeroes
+   fff <- formula(paste(" ~ ", target, " + ", paste(cols[isFactor], collapse=" + "), sep = ""))
+   if (sum(xtabs(fff, data = dat) == 0) > 0) {
+     return (TRUE)
+   }else{ # check whether there are cells in which there are all ones
+     if (sum(xtabs(fff, data = dat) == 1) > 0) {
+       return (TRUE)
+     }else{ # check whether there are cells with no exposure
+       nPossibleCells = prod(sapply(cols[isFactor], function(x) length(unique(dat[,x]))))
+       nActualCells = prod(dim(xtabs(fff, data = dat)))
+       if (nActualCells < nPossibleCells) {
+         return (TRUE)
+       }else{
+         return (FALSE)
+       }
+     }
+   }
+ }
+}
+# test whether a formula will cause separation
+fHasSeparation = function(f, dat)
+{
+ fAdj <- f
+ target <- gsub("()", "", f[2], fixed=TRUE)
+  
+ ff <- expandDotFormula(f, dat)
+ tt <- terms(ff)
+ ttf <- attr(tt, "factors")
+  
+ # ttf has columns that represent individual terms of the formula
+ fTerms <- colnames(ttf)
+ # check each term whether it exhibits separation
+ reject <- any(sapply(fTerms, function(x) termHasSeparation(target, x, dat)))
+  
+ return (reject)
+}
+ 
+# this function returns a NULL model if the formula causes separation
+noSeparationGLM = function(f, data){
+  
+ if (fHasSeparation(f, data)) {
+    target = gsub("()", "", f[2], fixed=TRUE)
+    a = formula(paste(target, " ~ 1", sep=""))
+    return (glm(a, data = data, family = binomial(link=logit)))
+ }else{
+   
+ return (glm(f, data = data, family = binomial(link=logit)))
+   
+ }
+}
+```
+
+```{r} 
+# test some formulae
+fHasSeparation(Response ~ 1, Brown)
+fHasSeparation(Response ~ 1 + Health_Fctr + Age + Income + na_count + na_count:Age + Health_Fctr:Age + Lang:Income + same:Income + same:na_count, Brown)
+fHasSeparation(Response ~ 1 + Health_Fctr + same + Age + Income + na_count + 
+    na_count:Age + Health_Fctr:Age + Lang:Income + same:Income, Brown)
+ 
+# test some GLMs
+noSeparationGLM(Response ~ 1, Brown)
+noSeparationGLM(Response ~ 1 + Health_Fctr + Age + Income + na_count + na_count:Age + Health_Fctr:Age + Lang:Income + same:Income + same:na_count, Brown)
+noSeparationGLM(Response ~ 1 + Health_Fctr + same + Age + Income + na_count + 
+    na_count:Age + Health_Fctr:Age + Lang:Income + same:Income, Brown)
+```
+
+All of the models considered so far cause separation.
+
+Here are the variables and interactions that cause separation.
+
+```{r}
+# list the columns that cause separation
+names(Brown[,-1])[sapply(names(Brown[,-1]), function(x) termHasSeparation("Response", x, Brown))]
+ 
+# list the pairs of columns that cause separation
+colPairs = expand.grid(names(Brown[,-1]), names(Brown[,-1]))
+colPairs = colPairs[apply(colPairs, 1, function(x) x[1] != x[2]),]
+combinations = apply(colPairs, 1, function(x) paste(x, collapse=":"))
+combinations[sapply(combinations, function(x) termHasSeparation("Response", x, Brown))]
+```
+
+Lang, Living, Working, Health_Fctr, Drives, and same cause separation.
+
+I will now try to use glmulti but reject models that have separation.
+
+```{r}
+# fit a GLM allowing that possible models will be rejected due to separation
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(glmulti)
+
+# read the training data
+Brown <- filter(df, Campus == "Brown Family")
+Brown$Birthplace <- NULL
+Brown$Campus <- NULL
+Brown$response <- NULL
+ 
+glms = glmulti(Response ~ ., data = Brown, level = 1, method="g", fitfunc = noSeparationGLM, confsetsize = 256, plotty = F, report = F)
+ 
+# show the result - note the absence of columns that cause separation
+ 
+summary(glms)$bestmodel
+print(glms)
+```
+
+The result is that basically all of the models are equally bad.
+
+I will try to do this again but also consider interactions, by using custom genetic algorithms.
+
+```{r}
+# a function to create GLM formulae from an indicator vector
+createFormula = function(indicators)
+{
+ # do the special case of no predictor columns, so use NULL model
+ if (sum(indicators) == 0)
+ return (formula(paste(target, " ~ 1", sep="")))
+  
+ # the more common case
+ return (formula(paste(target, " ~ ", paste(predictors[indicators == 1], collapse = " + "))))
+}
+```
+
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(memoise)
+ 
+# read the training data
+Brown <- filter(df, Campus == "Brown Family")
+Brown$Birthplace <- NULL
+Brown$Campus <- NULL
+Brown$response <- NULL
+
+# the function to be optimised
+glmScore = function(indicators)
+{
+ # return a NULL model if any errors or warnings occur
+ glm.mod = tryCatch (
+ glm(createFormula(indicators), data = Brown, family = binomial(link=logit)),
+ error = function(e) glm(createFormula(indicators * 0), data = Brown, family = binomial(link=logit)),
+ warning = function(w) glm(createFormula(indicators * 0), data = Brown, family = binomial(link=logit))
+ )
+ # if there are problems with NA parameters (e.g. via separation), then use a NULL model
+ if (any(is.na(coef(glm.mod))))
+ glm.mod = glm(createFormula(indicators * 0), data = Brown, family = binomial(link=logit))
+ print(glm.mod$formula)
+ return(AIC(glm.mod))
+}
+ 
+glmScr = memoise(glmScore)
+```
+
+```{r}
+# a vector of names of predictor columns
+target = "Response"
+predictors = names(Brown)
+predictors = predictors[predictors != target]
+indices = expand.grid(seq_len(length(predictors)), seq_len(length(predictors)))
+indices = indices[indices[,1] != indices[,2],]
+twoWays = apply(indices, 1, function(x) paste(predictors[x], collapse = ":"))
+predictors = c(predictors, twoWays)
+length(predictors)
+```
+
+There are 121 possible predictors, so 2^121 possible formulae.
+
+```{r}
+# custom function to create an initial population
+initPopn = function (object, ...) 
+{
+ population = matrix(0, nrow = object@popSize, ncol = object@nBits)
+ n = ncol(Coleman) - 1
+ probability = min(1, 2 / n)
+ ones = matrix(rbinom(n * object@popSize, 1, probability), object@popSize, n)
+ population[,seq_len(n)] = ones
+ return(population)
+}
+ 
+set.seed(1)
+ 
+ga.mod.2 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors), population = initPopn, popSize = 100, parallel = TRUE, run = 5)
+```
+
+```{r}
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.2@solution)], collapse=" + "))
+test <- glm(x, Brown, family = "binomial"); summary(test)
+```
+
+The best model this gives uses the interactions between same and Frailty and between Frailty and unknowns, with an AIC of 59.96. This is better than what was found by glmulti.
+
+Now I will do this one more time and also consider interactions.
+
+```{r}
+# libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(memoise, caret, GA)
+ 
+# function to show a formula as text
+f2text = function(f)
+{
+ if (class(f) != "formula")
+ stop("f is not a formula!")
+ return(paste(as.character(f)[c(2,1,3)], sep = "", collapse = " "))
+}
+ 
+# read the training data
+Brown <- filter(df, Campus == "Brown Family")
+Brown$Birthplace <- NULL
+Brown$Campus <- NULL
+Brown$response <- NULL
+ 
+# a vector of names of predictor columns
+target = "Response"
+predictors = names(Brown)
+predictors = predictors[predictors != target]
+indices = expand.grid(seq_len(length(predictors)), seq_len(length(predictors)))
+indices = indices[indices[,1] < indices[,2],]
+twoWays = apply(indices, 1, function(x) paste(predictors[x], collapse = ":"))
+predictors = c(predictors, twoWays)
+length(predictors)
+ 
+# a function to create GLM formulae from an indicator vector
+createFormula = function(indicators)
+{
+ if (is.null(indicators))
+ stop("createFormula: indicators is NULL!")
+ if (any(is.na(indicators)))
+ stop("createFormula: NA found in indicators!")
+ # do the special case of no predictor columns, so use NULL model
+ if (sum(indicators) == 0)
+ return (formula(paste(target, " ~ 1", sep="")))
+  
+ # the more common case
+ result = formula(paste(target, " ~ ", paste(predictors[indicators == 1], collapse = " + ")))
+ return (result)
+}
+ 
+# the function to be optimised
+glmScore = function(indicators)
+{
+ if (is.null(indicators))
+ stop("glmScore: indicators is NULL!")
+ if (any(is.na(indicators)))
+ {
+ if (colin_verbose)
+ print("glmScore: NA found in indicators!")
+ }
+ 
+ # return a NULL model if any errors or warnings occur
+ fff = createFormula(indicators)
+ useMod = FALSE
+ glm.mod = NULL
+ tryCatch (
+ {
+ glm.mod = glm(fff, data = Brown, family = binomial(link=logit));
+ useMod = TRUE;
+ }
+ ,
+ error = function(e) {
+ if (colin_verbose)
+ {
+ print(f2text(fff));
+ print(e);
+ }
+ },
+ warning = function(w) {
+ if (colin_verbose)
+ {
+ print(f2text(fff));
+ print(w);
+ }
+ }
+ )
+ if (! useMod) 
+ {
+ return (9e99)
+ }
+ # if there are problems with NA parameters (e.g. via separation), then use a NULL model
+ if (any(is.na(coef(glm.mod))))
+ {
+ if (colin_verbose)
+ print("NAs in coefficients")
+ return (9e99)
+ }
+ result = AIC(glm.mod)
+ return(result)
+}
+ 
+# create a version of GLM score that remembers previous results
+glmScr = memoise(glmScore)
+ 
+# define a glm fitness function
+glmFitness = function(x) return(-1 * glmScr(x))
+ 
+# custom function to create an initial population
+initPopn = function (object, ...) 
+{
+ population = matrix(0, nrow = object@popSize, ncol = object@nBits)
+ n = ncol(Brown) - 1
+ probability = min(1, 2 / n)
+ ones = matrix(rbinom(n*object@popSize, 1, probability), object@popSize, n)
+ population[,seq_len(n)] = ones
+ # make the first n rows be the nth predictor
+ n2 = min(n, object@popSize)
+for (i in seq_len(n2)) {
+ population[i,] <- rep(0, times = object@nBits)
+ population[i, i] <- 1
+}
+ return(population)
+}
+ 
+# custom function to monitor the genetic algorithm
+glmMonitor = function (object, digits = getOption("digits"), ...) 
+{
+ fitness <- na.exclude(object@fitness)
+ i = which.max(fitness[! is.na(object@fitness)])
+ p = object@population[! is.na(object@fitness),]
+ x = p[i,]
+ cat(paste("Iter =", object@iter, " | Median =", 
+ format(-1 * median(fitness), digits = 0), 
+ " | Best =", 
+ format(-1 * max(fitness), digits = 0), 
+ f2text(createFormula(x)),
+ "\n"))
+}
+ 
+# run a genetic algorithm to find the "best" GLM with interaction terms
+forget(glmScr)
+colin_verbose = FALSE
+ga.mod.3 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors), 
+ population = initPopn, 
+ popSize = 500, 
+ parallel = TRUE, 
+ run = 25, 
+ monitor = glmMonitor, 
+ seed = 1)
+# run two more times to make sure randomness didn't limit the models considered
+ga.mod.4 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors),
+population = initPopn,
+popSize = 500,
+parallel = TRUE,
+run = 25,
+monitor = glmMonitor,
+seed = 2)
+ga.mod.5 = ga(type = "binary", fitness = glmFitness, nBits = length(predictors),
+population = initPopn,
+popSize = 500,
+parallel = TRUE,
+run = 25,
+monitor = glmMonitor,
+seed = 3)
+```
+
+Now I will check which result was best.
+
+```{r}
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.3@solution)], collapse=" + "))
+test1 <- glm(x, Brown, family = "binomial"); summary(test1)
+
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.4@solution)], collapse=" + "))
+test2 <- glm(x, Brown, family = "binomial"); summary(test2)
+
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.5@solution)], collapse=" + "))
+test3 <- glm(x, Brown, family = "binomial"); summary(test3)
+```
+
+The second result was best. Using the genetic algorithms we have a model using Frailty and interactions between Frailty and Income, Income and Drives, and between Frailty and same, with an AIC = 57.23. Notably there is no separation or collinearity in this model.
+
+Let's look at a basic comparison of all the models.
+
+```{r}
+# reformat models as glm
+test1 <- glm(Response ~ 1, Brown, family = "binomial")
+test2 <- glm(bestAIC2@objects[[1]]$formula, Brown, family = "binomial")
+test3 <- glm(bestAIC2@objects[[2]]$formula, Brown, family = "binomial")
+test4 <- glm(bestAIC2@objects[[3]]$formula, Brown, family = "binomial")
+test5 <- glm(bestAIC2@objects[[4]]$formula, Brown, family = "binomial")
+test6 <- glm(bestAIC2@objects[[5]]$formula, Brown, family = "binomial")
+test7 <- glm(glms@objects[[1]]$formula, Brown, family = "binomial")
+test8 <- glm(glms@objects[[2]]$formula, Brown, family = "binomial")
+test9 <- glm(glms@objects[[3]]$formula, Brown, family = "binomial")
+test10 <- glm(glms@objects[[4]]$formula, Brown, family = "binomial")
+test11 <- glm(glms@objects[[5]]$formula, Brown, family = "binomial")
+test12 <- glm(bestAIC3@objects[[1]], Brown, family = "binomial")
+test13 <- glm(bestAIC3@objects[[2]], Brown, family = "binomial")
+test14 <- glm(bestAIC3@objects[[3]], Brown, family = "binomial")
+test15 <- glm(bestAIC3@objects[[4]], Brown, family = "binomial")
+test16 <- glm(bestAIC3@objects[[5]], Brown, family = "binomial")
+test17 <- test
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.3@solution[1,])], collapse=" + "))
+test18 <- glm(x, Brown, family = "binomial")
+x <- paste("Response" ,"~", paste(as.vector(predictors)[as.logical(ga.mod.4@solution[1,])], collapse=" + "))
+test19 <- glm(x, Brown, family = "binomial")
+```
+
+I will now look at the accuracy of the models using an ROC curve and choosing the best threshold.
+
+```{r}
+# baseline accuracy
+rowPerc(table(Brown$Response))
+nrow(Brown[Brown$Response == "Yes",])/nrow(Brown) # % of Brown saying YES
+```
+
+Here I will try to automate the comparison of the models with ROC and AUC. The function here will find the best threshold for the model according to accuracy (total true pos + true neg divided by obs), outputting that accuracy level and the corresponding threshold, as well as the specificity and sensitivity (true pos/false neg + true pos) and (1 - specificity) (1 - true neg/(false pos + true neg).
+
+```{r}
+confusion_test <- function(c, Campus, predict){
+  table(Campus$Response, predict >= c)
+}
+
+accuracy <- function(x, Campus){
+  
+  if (x[1,1] + x[2,1] == nrow(Campus)) {
+     x[1,1]/nrow(Campus)
+  }else{
+    (x[1,1] + x[2,2])/nrow(Campus)
+  }
+}
+
+specificity <- function(x){
+  x[2,1]/(x[2,1] + x[1,1])
+}
+
+sensitivity <- function(x, Campus){
+  
+  if (x[1,1] + x[2,1] == nrow(Campus)) {
+    return(0)
+  }else{
+    x[2,2]/(x[1,2] + x[2,2])
+  }
+}
+
+compare_accuracy <- function(mod, Campus){
+  threshold <- 0.5
+  predict <- predict(mod, type="response")
+  confusion <- confusion_test(threshold, Campus, predict) # pick threshold c
+  accuracy <- accuracy(confusion, Campus)
+  false.pos.rt <- 1 - specificity(confusion)
+  true.pos.rt <- sensitivity(confusion, Campus)
+  
+  # concordance-index (discrimination)
+  predpr <- predict(mod, type = c("response"))
+  roccurve <- roc(Campus$Response ~ predpr)
+  auc <- auc(roccurve) # larger is better
+  
+  # Hosmer and Lemeshow test (calibration)
+  # larger p-value is better
+  if (mod$formula == "Response ~ 1") {
+    H.L <- NA
+  }else{
+    H.L <- logitgof(Campus$Response, fitted(mod))$p.value
+  }
+  result <- cbind(threshold, accuracy, false.pos.rt, true.pos.rt, auc, H.L)
+  return(result)
+}
+
+models <- list(test1, test2, test3, test4, test5, test6, test7, test8, test9, test10, test11, test12, test13, test14, test15, test16, test17, test18, test19)
+x <- as.data.frame(do_call_rbind(lapply(models, compare_accuracy, Campus = Brown)))
+
+library(rcompanion)
+y <- compareGLM(test1, test2, test3, test4, test5, test6, test7, test8, test9, test10, test11, test12, test13, test14, test15, test16, test17, test18, test19)
+
+comparison <- cbind(x, y)
+
+# compare all models with DeLong's Test and select best models
+
+#load pROC
+library(pROC)
+
+tests <- c("test1", "test2", "test3", "test4", "test5", "test6", "test7", "test8", "test9", "test10", "test11", "test12", "test13", "test14", "test15", "test16", "test17", "test18", "test19")
+
+#create roc object for test1, test2, test3
+pred1 <- predict(test1, type="response")
+roc.out_test1 <- roc(Brown$Response, pred1, plot=TRUE, smooth = FALSE)
+pred2 <- predict(test2, type="response")
+roc.out_test2 <- roc(Brown$Response, pred2, plot=TRUE, smooth = FALSE)
+pred3 <- predict(test3, type="response")
+roc.out_test3 <- roc(Brown$Response, pred3, plot=TRUE, smooth = FALSE)
+pred4 <- predict(test4, type="response")
+roc.out_test4 <- roc(Brown$Response, pred4, plot=TRUE, smooth = FALSE)
+pred5 <- predict(test5, type="response")
+roc.out_test5 <- roc(Brown$Response, pred5, plot=TRUE, smooth = FALSE)
+pred6 <- predict(test6, type="response")
+roc.out_test6 <- roc(Brown$Response, pred6, plot=TRUE, smooth = FALSE)
+pred7 <- predict(test7, type="response")
+roc.out_test7 <- roc(Brown$Response, pred7, plot=TRUE, smooth = FALSE)
+pred8 <- predict(test8, type="response")
+roc.out_test8 <- roc(Brown$Response, pred8, plot=TRUE, smooth = FALSE)
+pred9 <- predict(test9, type="response")
+roc.out_test9 <- roc(Brown$Response, pred9, plot=TRUE, smooth = FALSE)
+pred10 <- predict(test10, type="response")
+roc.out_test10 <- roc(Brown$Response, pred10, plot=TRUE, smooth = FALSE)
+pred11 <- predict(test11, type="response")
+roc.out_test11 <- roc(Brown$Response, pred11, plot=TRUE, smooth = FALSE)
+pred12 <- predict(test12, type="response")
+roc.out_test12 <- roc(Brown$Response, pred12, plot=TRUE, smooth = FALSE)
+pred13 <- predict(test13, type="response")
+roc.out_test13 <- roc(Brown$Response, pred13, plot=TRUE, smooth = FALSE)
+pred14 <- predict(test14, type="response")
+roc.out_test14 <- roc(Brown$Response, pred14, plot=TRUE, smooth = FALSE)
+pred15 <- predict(test15, type="response")
+roc.out_test15 <- roc(Brown$Response, pred15, plot=TRUE, smooth = FALSE)
+pred16 <- predict(test16, type="response")
+roc.out_test16 <- roc(Brown$Response, pred16, plot=TRUE, smooth = FALSE)
+pred17 <- predict(test17, type="response")
+roc.out_test17 <- roc(Brown$Response, pred17, plot=TRUE, smooth = FALSE)
+pred18 <- predict(test18, type="response")
+roc.out_test18 <- roc(Brown$Response, pred18, plot=TRUE, smooth = FALSE)
+pred19 <- predict(test19, type="response")
+roc.out_test19 <- roc(Brown$Response, pred19, plot=TRUE, smooth = FALSE)
+
+all_tests <- combn(
+  list(
+    "test1" = roc.out_test1,
+    "test2" = roc.out_test2,
+    "test3" = roc.out_test3,
+    "test4" = roc.out_test4,
+    "test5" = roc.out_test5,
+    "test6" = roc.out_test6,
+    "test7" = roc.out_test7,
+    "test8" = roc.out_test8,
+    "test9" = roc.out_test9,
+    "test10" = roc.out_test10,
+    "test11" = roc.out_test11,
+    "test12" = roc.out_test12,
+    "test13" = roc.out_test13,
+    "test14" = roc.out_test14,
+    "test15" = roc.out_test15,
+    "test16" = roc.out_test16,
+    "test17" = roc.out_test17,
+    "test18" = roc.out_test18,
+    "test19" = roc.out_test19
+  ),
+  FUN = function(x, ...) roc.test(x[[1]], x[[2]]),
+  m = 2,
+  simplify = FALSE, 
+  reuse.auc = TRUE, 
+  method = "delong", 
+  na.rm = TRUE
+)
+
+tests_names <- combn(
+  list("test1", "test2", "test3", "test4", "test5", "test6", "test7", "test8", "test9", "test10", "test11", "test12", "test13", "test14", "test15", "test16", "test17", "test18", "test19"), 
+  m = 2, 
+  FUN = paste, 
+  simplify = TRUE, 
+  collapse = "_"
+)
+all_tests <- setNames(all_tests, tests_names)
+
+test_results <- function(x) { # x is a vector length of names(all_tests)
+  
+  p <- all_tests[[x]]$p.value
+  aucs <- as.vector(all_tests[[x]]$estimate)
+  if (p < 0.05) {
+    
+    if (aucs[1] > aucs[2]) {
+      
+      return(gsub("_test[0-9]+", "", tests_names[x]))
+      
+    }else{
+      
+      return(gsub("test[0-9]+_", "", tests_names[x]))
+      
+    }
+    
+  }else{
+    return(FALSE)
+  }
+}
+
+ranks <- sapply(1:length(names(all_tests)), test_results)
+x <- cbind(names(all_tests), ranks)
+
+rank_tests <- function(x, results){ # x is a vector length of names(all_tests)
+  
+  a <- as.vector(results[x,])
+  
+  if (a[2] == "FALSE") {
+    return(NULL)
+  }else{
+    return(gsub("_", "", gsub(a[2], "", a[1])))
+  }
+}
+
+best.auc <- comparison[! tests %in% unique(unlist(sapply(1:length(names(all_tests)), rank_tests, results = x))),]
+
+# automatically select model with best H-L result
+H.L1 <- comparison %>% pull(H.L)
+H.L <- H.L1[!is.na(H.L1)]
+best.H.L <- comparison[max(H.L) == H.L1,]
+best.H.L <- best.H.L %>% remove_missing()
+
+# bind with best auc
+best <- rbind(best.auc, best.H.L)
+unique(best) ## BEST MODELS ##
+```
+
+
+The best models are test4 and test5. test4 was found using glmulti limited to the 6 most important terms according to the GBM, considering interaction terms. It is likely overfit given the high false positive rate, whereas test5 is more reasonable, although the discrimination and accuracy are far worse.
+
+```{r}
+BrownModels_filtered <- unique(best) ## BEST MODELS ##
+BrownModels <- comparison
+```
+
+## RESULTS ##
+
+```{r}
+BrightonModels
+ColemanModels
+ShillmanModels
+BrownModels
+GoldaModels
+```
+
+```{r}
+write.csv(BrightonModels_filtered, "BrightonModels_filtered.csv")
+write.csv(ColemanModels_filtered, "ColemanModels_filtered.csv")
+write.csv(ShillmanModels_filtered, "ShillmanModels_filtered.csv")
+write.csv(BrownModels_filtered, "BrownModels_filtered.csv")
+write.csv(GoldaModels_filtered, "GoldaModels_filtered.csv")
+```
+
+```{r}
+write.csv(BrightonTrain, "BrightonTrain.csv")
+write.csv(Coleman, "Coleman.csv")
+write.csv(Brown, "Brown.csv")
+write.csv(Shillman, "Shillman.csv")
+write.csv(Golda, "Golda.csv")
+```
+
+
+

@@ -1,0 +1,336 @@
+---
+title: '2Life Communities: Patterns in Responses to COVID-19 Testing Consent-Waiver'
+author: "Adam Chapnik"
+date: "12/28/2020"
+output:
+  html_document: default
+---
+
+```{r include=FALSE}
+library(knitr)
+library(broom)
+library(tidytext)
+library(dplyr)
+library(kableExtra)
+library(readr)
+
+BrightonModels_filtered <- read_csv("BrightonModels_filtered.csv")
+ColemanModels_filtered <- read_csv("ColemanModels_filtered.csv")
+BrownModels_filtered <- read_csv("BrownModels_filtered.csv")
+ShillmanModels_filtered <- read_csv("ShillmanModels_filtered.csv")
+GoldaModels_filtered <- read_csv("GoldaModels_filtered.csv")
+
+BrightonTrain <- read_csv("BrightonTrain.csv")
+Coleman <- read_csv("Coleman.csv")
+Brown <- read_csv("Brown.csv")
+Shillman <- read_csv("Shillman.csv")
+Golda <- read_csv("Golda.csv")
+
+BrightonTrain$Response <- ifelse(BrightonTrain$Response == "No", 0, ifelse(BrightonTrain$Response == "Yes", 1, ifelse(is.na(BrightonTrain$Response), 98, 99)))
+
+Coleman$Response <- ifelse(Coleman$Response == "No", 0, ifelse(Coleman$Response == "Yes", 1, ifelse(is.na(Coleman$Response), 98, 99)))
+
+Brown$Response <- ifelse(Brown$Response == "No", 0, ifelse(Brown$Response == "Yes", 1, ifelse(is.na(Brown$Response), 98, 99)))
+
+Shillman$Response <- ifelse(Shillman$Response == "No", 0, ifelse(Shillman$Response == "Yes", 1, ifelse(is.na(Shillman$Response), 98, 99)))
+
+Golda$Response <- ifelse(Golda$Response == "No", 0, ifelse(Golda$Response == "Yes", 1, ifelse(is.na(Golda$Response), 98, 99)))
+```
+
+###INTRODUCTION
+
+In this report I lay out the results of my analysis of data on 2Life Communities' residents, in which I try to understand patterns in their responses to a COVID-19 testing consent waiver. This analysis may be useful in efficiently reapproaching residents who declined to be tested in order to possibly persuade them to change their responses.
+
+###METHODS
+
+####MEASURE
+
+The data contains 1,492 observations. Each observation represents a single resident's response to a COVID-19 consent waiver at 2Life Communities. All residents should be contained within the dataset. The demographic information in the dataset was collected separately from the waiver, but was almost entirely provided by the resident.
+
+The dependent variable for the analysis was the resident's response to the consent waiver, a discrete variable in which a 1 represented the resident gave consent to be tested and a 0 represented the resident declined to be tested. Although many responses in the dataset were left blank, blank responses were recoded as 0.
+
+The independent variables in the analysis are: resident campus, resident age, resident primary language, resident birthplace, resident annual income, resident frailty as measured by the number of ADL's they find difficult, the resident's marital status, the resident's employment status, whether a resident owns a car, resident gender, resident race, resident ethnicity, resident apartment number, the number of pieces of demographic information the resident left completely blank, and the number of pieces of demographic information the resident either declined to answer or did not know.
+
+Resident gender, race, and ethnicity were removed after exploratory analysis because they appeared insignificant. Several independent variables were also recoded. Marital status was recoded so that a 1 represented the resident lives alone, a 0 represented the resident is married or in a domestic partnership, a 98 represented a resident did not respond to the question of their marital status, and a 99 represented the resident prefered not to disclose their marital status. Resident health was recoded a 1 represented excellent health, a 2 represented very good health, a 3 represented good health, a 4 represented fair health, and a 5 represented poor health, with 98 and 99 representing that they either did not provide their health or declined to answer, respectively. Employment status was recoded so that a 1 represented a resident is retired and a 2 represented a resident is either employed or seeking work, with a 98 and 99 representing that they either did not provide their employment status or declinded to answer, respectively. Vehicle onwership was recoded so that a 1 represented they owned a vehicle and 0 represented they did not. The variable "same," which represents whether a resident gave the same response as whomever they live with (or live alone), was coded by looking at the resident's response in relation to their apartment number, given them a 1 if they gave the same response, a 0 if it was different, and a 99 if they live alone.
+
+Gaps in age were filled using the overall mean age, gaps in birthplace were filled using the origin country of their primary language, gaps in income were filled using the overall mean income, and gaps in frailty were filled using the overall mean frailty.
+
+####DATA ANALYSIS
+
+Observations in the dataset are likely not independent. The campus on which a resident lives likely influences their response. Although a mixed effect model would work in this scenario, there are only five campuses (levels), and it's likely that a parsimonious model would have different significant variables on different campuses. Therefore, I will use a multiple logistic regression model for each campus. It is possible that all campuses are statistically similar, but there is not necessarily any statistical limitation in creating a different model for each campus.
+
+Although the room in which a resident lives would also violate independence of observations, I will be treating whether a resident has the same answer the one(s) they live with as a variable instead of a level.
+
+The goal of this project is to understand the most significant predictors of a resident's response at each particular campus. This requires finding the best logit models for predicting response at each campus (best discrimination). It's okay if there is multicollinearity since the models will only be applied to the residents in the dataset, and calibration is not the highest priority either because diagnosis is more important here than prognosis. 
+
+In order to achieve the best models, I used the R packages bestglm, glmulti, glmulti with some unique specifications, and I also used code for a few custom genetic algorithms that look for the best models with interactions, heavily relying on code published in a series of blog posts by Colin Priest (https://colinpriest.com/2015/07/10/efficiently-building-glms-part-1/). I only split the dataset into a testing and training set for Brighton Campus because the dataset is especially large. After created a number of models for each campus, I compare the models and choose the best one.
+
+###RESULTS
+
+My analysis resulted in 13-20 unique models per campus dataset. Given that the sake of this exercise is diagnostic rather than prognostic, discrimination will have a greater weight in determining the best models. That said, in order that these models can be used in the future for addressing whether a resident consents to taking the COVID-19 vaccine, I also consider calibration. 
+```{r eval=FALSE, include=FALSE}
+unique(BrightonModels)
+unique(ColemanModels)
+unique(ShillmanModels)
+unique(BrownModels)
+unique(GoldaModels)
+```
+
+For all of these models, I calculated the concordance-index using the AUC, the Hosmer-Lemeshow goodness of fit test p-value, the AIC and/or the AICc, the BIC, and McFadden's pseudo $R^2$. Note that although I will mention whether a model would be useful for prognosis, I do not specify how to use the model for that purpose. In the future if that becomes a need, I can also provide that further information.
+
+I filtered the models with a simple initial comparison of the c-indices using DeLong's Test in order to find the models with the significantly highest discrimination. To this I added the model(s) with the highest calibration if the model did not meet the discrimination threshold.
+
+####Brighton Campus
+
+```{r echo=FALSE}
+BrightonModels_filtered %>% kbl(caption = "Brighton Campus Candidate Model Statistics") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+The best concordance-index (model three) is $C=0.600$. Notably, this c-index was actually not statistically significant compared to the others in the set. According to the Hosmer-Lemeshow tests, the models with the best calibration had $P=0.999$ (number three) and $P=0.938$ (number five). I opt for McFadden's pseudo $R^2$ in order to measure model fit to double-check the Hosmer-Lemeshow tests. Ultimately, none of the models have very good fit, with all $R^2<0.1$. 
+
+According to Burnham & Anderson (2002, ch. 7) in *Model Selection and Multimodel Inference: A Practical Information-Theoretic Approach* (Ed. 2), AIC should be avoided in favor of AICc unless $N/K < 40$, with $N$ being the number of parameters in the model and $K$ is the number of observations. Given that the training set used from Brighton has 678 observations, a model would have to have at least 17 parameters to use AIC. Thefore, I use AICc. The model with the second best calibration has the highest AICc with $AICc=849.5$, whereas the model with the best calibration has the second worst AICc with $AICc=855.0$. On the other hand, the fifth model has the worst BIC with $BIC=990.8$ and the third model is significantly better with $BIC=957.3$. 
+
+Given the number of terms in the fifth model, I am a bit worried about overfitting and difficulty with interpretation. The third model, however, has a more reasonable number of terms, with a relatively good AICc, BIC, and c-index. Even if the calibration isn't great, that is the last priority in this exercise. The discrimination of the third model is excellent, meaning it is very useful for diagnosis, although it is limited for future use in prognostication.
+
+The terms in the third model are: the resident's primary language, whether the resident is working, whether the resident responded to the consent form the same as whoever they live with (or whether they live alone), and the interaction between whether the resident is working and how many pieces of demographic information they explicitly did not know or declined to answer. Below is a list of each variable, its coefficient, the standard error for each coefficient, the z-statistic from the Wald-test for each coefficient, and the p-values for those Wald-tests. The confidence intervals for the coefficients of are also included underneath.
+
+```{r include=FALSE}
+BrightonFit <- glm(Response ~ Lang + Working + same + Working:unknowns, BrightonTrain, family = "binomial")
+```
+
+```{r echo=FALSE}
+broom::tidy(BrightonFit) %>% kbl(caption = "Brighton Campus Model Statistics") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+According to the model, after controlling for whether a resident is working, whether the resident responded to the consent form the same as whoever they live with (or whether they live alone), and the interaction between whether they are working and how many pieces of demographic information they explicitly did not know or declined to answer, in order of highest to lowest odds of consenting to be tested as compared to Albanian speakers, are: "Other" speakers, Spanish speakers, Korean speakers, English speakers, Mandarin speakers, Russian speakers, Cantonese speakers, Toishanese speakers, then Portuguese speakers. Of those residents, Portuguese speakers have a much lower odds of consenting. Creole, Lithuanian, and Farsi speakers have higher odds than Albanian speakers of *not* consenting. 
+
+After controlling for the resident's primary language, whether the resident responded to the consent form the same as whoever they live with (or whether they live alone), and the interaction between whether they are working and how many pieces of demographic information they explicitly did not know or declined to answer, as compared to residents who are working, residents who declined to answer or don't know their employment status have the highest odds of consenting to be tested. Residents who are not working or did not respond to the question of their employment status have a higher odds than those who are working of *not* consenting to be tested.
+
+After controlling for the resident's primary language, whether a resident is working, and the interaction between whether they are working and how many pieces of demographic information they explicitly did not know or declined to answer, as compared to residents who live with at least one other resident and gave different responses than at least one of those residents, residents who live with at least one other resident and gave the same response as that other resident have a 38.79% *lower* odds of consenting to be tested, and residents who live alone have a 60.12% *lower* odds of consenting to be tested.
+
+Finally, after controlling for all other variables, for residents who are not working, having one additional piece of demographic information they explicitly did not know or declined to answer is associated with a 189.4% increase in the odds of consenting to be tested. Among residents who did not respond to the question of their employment status, having one additional piece of demographic information they explicitly did not know or declined to answer is associated with a 17.73% decrease in the odds of consenting. For residents who are working, this is associated with a 48.25% decrease in the odds of consenting. Among residents who declined to answer or did not know their employment status, this is associated with a massive decrease in the odds of consenting.     
+
+```{r echo=FALSE}
+confint(BrightonFit) %>% kbl(caption = "Brighton Campus Model 95% Confidence Intervals") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+Notably, the confidence intervals are very wide for most variables. They are narrowest for Creole speakers, Farsi speakers, Lithuanian speakers, Portuguese speakers, residents who are retired, residents who did not answer their employment status, residents who gave the same response as those they live with, residents who live alone, and the interaction between employment status and the number of pieces of information they declined to answer or did not know.
+
+####Coleman Campus
+
+```{r include=FALSE}
+ColemanModels_filtered <- read_csv("ColemanModels_filtered.csv")
+```
+
+```{r echo=FALSE}
+ColemanModels_filtered %>% kbl(caption = "Coleman Campus Candidate Model Statistics") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+The first eight models have statistically similar c-indices, all between $C=0.793$ and $C=0.834$. According to the Hosmer-Lemeshow tests, the model with the best calibration (number nine) had a p-value of $P=0.909$. The second closest was the third model, with a p-value of $P=0.699$. Notably, according to McFadden's pseudo $R^2$ the ninth model had the worst calibration with $R^2=0.107$. Models four through seven had the best calibration according to McFadden's pseudo $R^2$ with $R^2=0.2953$, which is very good.
+
+This time, given that the training set used from Coleman has 161 observations, a model would have to have at least five parameters to use AIC. Only the first two and last models have fewer than five parameters, so I use AIC to compare the models. Of models four through seven, the fourth has the best AIC of $AIC=206.7$, and the sixth has the worst AIC of $AIC=210.7$. The fourth model also has the lowest BIC of $283.8$ among those four models, so I will choose the fourth model as the best. 
+
+The fourth model has very good calibration and very good discrimination, making it good for both diagnosis and prognosis. The terms in the fourth model are: the resident's birthplace, whether the resident responded to the consent form the same way as whoever they live with (or whether they live alone), the residen'ts age, the resident's income, the resident's frailty level, and the interactions between the resident's frailty and income, the interaction between the resident's self-reported health and income, the interaction between whether the resident responded to the consent form the same way as whomever they live with (or whether they live alone) and the resident's age, and finally the interaction between whether the resident responded to the consent form the same way as whomever they live with (or whether they live alone) and the resident's frailty.
+
+Below is a list of each variable, its coefficient, the standard error for each coefficient, the z-statistic from the Wald-test for each coefficient, and the p-values for those Wald-tests. The confidence intervals for the coefficients of are also included underneath.
+
+```{r include=FALSE}
+ColemanFit <- glm(Response ~ 1 + Birthplace + same + Age + Income + Frailty + Frailty:Income + Health_Fctr:Income + same:Age + same:Frailty, Coleman, family = "binomial")
+```
+
+```{r echo=FALSE}
+broom::tidy(ColemanFit) %>% kbl(caption = "Coleman Campus Model Statistics") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+According to the model, after controlling for all other factors, in order of highest to lowest odds of consenting to be tested as compared to residents born in China are residents born South Africa then residents born in Ukraine, who both have very high odds of consenting. Residents born in Former Soviet Union have a 30.97% higher odds of consenting to be tested than those born in China. Residents born in the US have a 48.15% *lower* odds of consenting than those born in China. Residents born in "Other" have a 96.25% *lower* odds of consenting than those born in China. Residents born in Haiti and then Israel have a very low odds of consenting.
+
+After controlling for all other factors, residents who live with other residents but gave different responses than those residents have virtually infinitely *lower* odds of consenting than those who live alone or gave the same responses.
+
+After controlling for all other factors, when a resident finds one ADL difficult, a one-dollar increase in income is associated with a 171.53% increase in the odds of consenting. If a resident find no ADLs difficult, a 100-dollar increase in the income of a resident is associated with a 10.92% *decrease* in the odds of them consenting. When a resident finds 2 ADLs difficult, a one-dollar increase in income is associated with a 171.545% increase in the odds of consenting. When a resident finds 5 ADLs difficult, a one-dollar increase in income is associated with a 171.59% increase in the odds of consenting.
+
+For residents with excellent health, a 100-dollar increase in the income of a resident is associated with a 10.92% *decrease* in the odds of them consenting. For residents with very good health, a 100-dollar increase in income is associated with a 0.86% increase in the odds of consenting, which is similar to the change for those with all levels of self-reported health.
+
+Among residents who gave different responses from those who they live with, a one year increase in age is associated with a massive increase in the odds of them consenting. For residents who gave the same response as those they live with, a one year increase in age is associated with a 20.92% increase in the odds of consenting. For residents who live alone, a one year increase in age is associated with a 1.98% *decrease* in the odds of consenting.
+
+Among residents who gave different responses from those who they live with, a one unit increase in the number of ADLs they find difficult is associated with a 56.11% *decrease* in the odds of them consenting. For residents who gave the same responses as those they live with, a one unit increase in the number ADLs they find difficult is associated with a 86.12% decrease in the odds of them consenting.
+
+```{r echo=FALSE}
+confint(ColemanFit, level = .9) %>% kbl(caption = "Coleman Campus Model 95% Confidence Intervals") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+Some of the confidence intervals are rather wide. However, the 95% confidence interval for residents born in "Other" is negative, as is the cofidence interval for frailty, and the interaction between whether a resident's partner's response matched theirs and frailty. The confidence interval for the interaction between frailty and income is entirely positive. Since the model has separation, not all of the terms have 95% confidence intervals, but this does not mean that the odds given this predictor are certain, but rather that for those variables there is much more uncertainty than for other variables.
+
+####Brown Family Campus
+
+```{r include=FALSE}
+BrownModels_filtered <- read_csv("BrownModels_filtered.csv")
+```
+
+```{r echo=FALSE}
+BrownModels_filtered %>% kbl(caption = "Brown Family Campus Candidate Model Statistics") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+All of the first five models have excellent calibration according to both the Hosmer-Lemeshow tests and McFadden's pseudo $R^2$. All of these models also have statistically similar and excellent discrimination. 
+
+Since it would require only two predictors in order for AIC to be more useful than AICc given that Brown has only 66 observations - and the top five models all have more than two predictors - I will use AIC instead of AICc. The model with the lowest AIC and lowest BIC among the top five models is the first model, with $AIC=58.35$ and $BIC=110.90$, making it the most parsimonious. The fourth model has excellent calibration and outstanding discrimination, making it great for both diagnosis and prognosis.
+
+The predictors in the model are: the resident's self-reported health, the resident's age, the resident's income, the number of demographic questions the resident left blank, and the interaction between the number of demographic questions the resident left blank and their age, the interaction between the resident's health and age, the interaction between the resident's primary language and income, the interaction between whether the resident responded to the consent form the same way as whomever they live with (or whether they live alone) and age, and the interaction between whether the resident responded to the consent form the same way as whomever they live with (or whether they live alone) and income.
+
+Below is a list of each variable, its coefficient, the standard error for each coefficient, the z-statistic from the Wald-test for each coefficient, and the p-values for those Wald-tests. The confidence intervals for the coefficients of are also included underneath.
+
+```{r include=FALSE}
+BrownFit <- glm(Response ~ 1 + Health_Fctr + Age + Income + na_count + na_count:Age + Health_Fctr:Age + Lang:Income + same:Age + same:Income, Brown, family = "binomial")
+```
+
+```{r echo=FALSE}
+broom::tidy(BrownFit) %>% kbl(caption = "Brown Family Campus Model Statistics") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+According to the model, keeping all other variables being equal, for a resident having no missing information a one-year increase in age in associated with a massive increase in the odds of consenting. This association only increases with the number of pieces of missing information.
+
+For residents with excellent health, a one-year increase in age is associated with a massive increase in the odds of consenting. This association is stronger for residents with very good and good health. For residents with fair health or did not report their health, a one-year increase in age is associated with a massive *decrease* in the odds of consenting.
+
+Among Cantonese speakers, a 100-dollar increase in income is associated with a 55.15% *decrease* in the odds of consenting. Among English speakers, a 100-dollar increase in income is associated with a 55.44% increase in the odds of consenting. Among Farsi speakers, a 100-dollar incresase in income is associated with a 81.36% decrease in the odds of consenting. Among Mandarin speakers, a 100-dollar increase in income is associated with a 20.33% increase in the odds of consenting. Among "Other" speakers, a 100-dollar increase in income is associated with a 513% increase in the odds of consenting. Among Russian speakers, a 100-dollar increase in income is associated with a 20.38% decrease in the odds of consenting.
+
+Among residents who gave different responses from those they live with, a one-year increase in age is associated with a massive increase in the odds of consenting. This association is larger for residents who gave the same response as those they live with, and slightly smaller for residents who live alone. However, the interaction between age and whether a resident gave the same response as those they live with is always associated with a large increase in the odds of consenting.
+
+Among residents who gave different responses from those they live with, a 100-dollar increase in income is associated with a 55.15% decrease in the odds of consenting. For residents who gave the same response as those they live with, a 100-dollar increase in income is associated with a 85.25% decrease in the odds of consenting.
+
+```{r echo=FALSE}
+confint(BrownFit) %>% kbl(caption = "Brown Family Campus Model 95% Confidence Intervals") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+The 95% confidence intervals for all terms in the model straddle positive and negative odds associations, meaning all of the variables could be associated with a very different odds than it seems. This is mostly due to the small sample size.
+
+####Shillman Campus
+
+```{r include=FALSE}
+ShillmanModels_filtered <- read_csv("ShillmanModels_filtered.csv")
+```
+
+```{r echo=FALSE}
+ShillmanModels_filtered2 %>% kbl(caption = "Shillman Campus Candidate Model Statistics") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+The first six models have excellent discrimination that is statistically similar and much better than that of the last model. The calibration according to McFadden's pseudo $R^2$ for these six models is also very good.
+
+Since it would require only four predictors in order for AIC to be more useful than AICc given that Shillman has only 136 observations, and all models have at least four predictors, I will use AIC instead of AICc. Of the top six models, the fifth model has the best AIC of $AIC=108.4$. However, the sixth has the best BIC of $BIC=169.2$. Given that it has the second best BIC ($178.4$) and better AIC and discrimination, I believe the fifth model is better. This model has nearly the worst calibration among the six, but discrimination is more important here, and its calibration is also very good anyway since the p-value of its McFadden's pseudo $R^2$ is $P>0.4$.
+
+The predictors in the fifth model are: the resident's frailty, whether the resident lives alone or with someone, the resident's health, and the interaction between the resident's income and frailty, the interaction between the resident's frailty and the number of demographic questions the resident left blank, the interaction between the resident's age and whether the resident lives alone or with someone, the interaction between the resident's age and whether they are working, the interaction between the number of demographic questions the resident left blank and whether the resident owns a car, the interaction between the resident's age and whether the resident responded to the consent form the same way as whomever they live with (or whether they live alone), and the interaction between the resident's income and whether the resident responded to the consent form the same way as whomever they live with (or whether they live alone).
+
+Below is a list of each variable, its coefficient, the standard error for each coefficient, the z-statistic from the Wald-test for each coefficient, and the p-values for those Wald-tests. The confidence intervals for the coefficients of are also included underneath.
+
+```{r include=FALSE}
+ShillmanFit <- glm(Response ~ Frailty + Living + Health_Fctr + Income:Frailty + Frailty:na_count + Age:Living + Age:Working + na_count:Drives + Age:same + Income:same, Shillman, family = "binomial")
+```
+
+```{r echo=FALSE}
+broom::tidy(ShillmanFit) %>% kbl(caption = "Shillman Campus Model Statistics") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+Among residents who live alone, a one-year increase in age is associated with a 26.57% increase in the odds of consenting. Among residents who live with another resident, a one-year increase in age is associated with a 34.94% decrease in the odds of consenting. Among residents who did not respond to the question of their marital status, a one-year increase in age is associated with a 48.38% increase in the odds of consenting.
+
+For residents who find one ADL difficult, a one-dollar increase in income is associated with a 0.016% decrease in the odds of consenting. For residents who find two ADLs difficult, a one-dollar increase in income is associated with a 99.97% increase in the odds of consenting. This is association only grows larger with the number of ADLs a resident finds difficult. There is also a similar association between response and the number of answers a resident left blank at different numbers of ADLs they find difficult.
+
+In comparison to residents who are retired, for residents who are working, a one-year increase in age is associated with a 5.25% increase in the odds of consenting. In comparison to residents who are retired, for residents who did not answer the question of their employment status, a one-year increase in age is associated with a 33.48% increase in the odds of consenting. In comparison to residents who are retired, for residents who either declined to answer and do not know their employment status, a one-year increase in age is associated with a 27.00% increase in the odds of consenting. 
+
+Compared to residents who do not own a car, for residents who do own a car, having one addition blank answer is associated with a 741% increase in the odds of consenting. Compared to residents who gave different responses as those they live with, for residents who gave the same response, a one-year increase in age is associated with a 35.93% decrease in the odds of consenting. Compared to residents who gave different responses as those they live with, for residents who live alone, a one-year increase in age is associated with a 1.49% increase in the odds of consenting. Compared to residents who gave different responses as those they live with, for residents who gave the same response, a one-dollar increase in income is associated with a 0.10% increase in the odds of consenting. Compared to residents who gave different responses as those they live with, for residents who live alone, a one-dollar increase in income is associated with a slight (0.0003%) decrease in the odds of consenting.
+
+Finding one additional ADL difficult is associated with a 98.06% decrease in the odds of consenting. Compared to residents who live alone, living with another resident is associated with a massive increase in the odds of consenting. Compared to residents who live alone, not answering the question of marital status is associated with a huge decrease in the odds of consenting. As compared to residents with excellent health, having very good, good, fair, or even poor health is associated with a large increase in the odds of consenting. On the other hand, compared to residents with excellent health, declining to answer about health or leaving the question blank is associated with a huge decrease in the odds of consenting.
+
+```{r echo=FALSE}
+confint(ShillmanFit) %>% kbl(caption = "Shillman Campus Model 95% Confidence Intervals") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+Notably, many of the 95% confidence intervals for the model variables are always associated with a positive or negative log odds of a certain response. Those are: frailty level, living with another resident, having very good or good health, the interactions between frailty and income, between frailty and the number of question left blank, between age and living alone, between age and not answering marital status, age and working, age and giving the same response as those a resident lives with, and income and given the same response as those a resident lives with. Because the model has separation, some variables do not have 95% confidence intervals but this does not mean the odds of a certain response given those variables is certain.
+
+####Golda Meir Campus
+
+```{r include=FALSE}
+GoldaModels_filtered <- read_csv("GoldaModels_filtered.csv")
+```
+
+```{r echo=FALSE}
+GoldaModels_filtered2 %>% kbl(caption = "Golda Meir Campus Candidate Model Statistics") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+The discrimination for all of the models is statistically similar and pretty good. For all of the models, the calibration according to McFadden's pseudo $R^2$ is pretty bad, with p-values all below $P=0.01$. However, the p-value for the Hosmer-Lemeshow tests for all the models is higher. It is therefore up in the air how good the calibration of these models is.
+
+Since it would require six predictors in order for AIC to be more useful than AICc given that Golda Meir has 211 observations, and the first three models have fewer than six predictors, I will use both AIC and AICc. Accordingly, I believe the second model is the best, with the lowest AIC among the first three models and the second lowest BIC among all six, making it the most parsimonious with still high discrimination. Although the calibration is low, that is not as relevant for this exercise.
+
+The predictors in the second model are: whether the resident responded to the consent form the same way as whomever they live with (or whether they live alone), the resident's income, the interaction between the resident's primary language and income, and the interaction between the resident's self-reported health and income.
+
+Below is a list of each variable, its coefficient, the standard error for each coefficient, the z-statistic from the Wald-test for each coefficient, and the p-values for those Wald-tests. The confidence intervals for the coefficients of are also included underneath.
+
+```{r include=FALSE}
+GoldaFit <- glm(Response ~ 1 + same + Income + Lang:Income + Health_Fctr:Income, Golda, family = "binomial")
+```
+
+```{r echo=FALSE}
+broom::tidy(GoldaFit)  %>% kbl(caption = "Golda Meir Campus Model Statistics") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+According to the model, keeping all other variables constant, for Albanian speakers a one-thousand-dollar increase in income is associated with a 4.87% increase in the odds of consenting. The following are compared to the association for Albanian speakers. For Cantonese speakers, a one-thousand-dollar increase in income is associated with a 2.45% decrease in the odds of consenting. For English speakers, a one-thousand-dollar increase in income is associated with a 0.61% increase in the odds of consenting. For Farsi speakers, a one-thousand-dollar increase in income is associated with a 200.1% increase in the odds of consenting. For Korean speakers, a one-thousand-dollar increase in income is associated with a 113.16% increase in the odds of consenting. For Mandarin speakers, a one-thousand-dollar increase in income is associated with a 2.94% increase in the odds of consenting. For "Other" speakers, a one-thousand-dollar increase in income is associated with a 6.91% decrease in the odds of consenting. For Russian speakers, a one-thousand-dollar increase in income is associated with a 2.01% increase in the odds of consenting. For Spanish speakers, a one-thousand-dollar increase in income is associated with a 68.71% increase in the odds of consenting. For Toishanese speakers, a one-thousand-dollar increase in income is associated with a 99.00% decrease in the odds of consenting
+
+For residents with excellent health, a one-thousand-dollar increase in income is associated with a 4.87% increase in the odds of consenting. The following are in comparison to this association for residents with excellent health. For residents with very good health, a one-thousand-dollar increase in income is associated with a 6.62% increase in the odds of consenting. For residents with good health, a one-thousand-dollar increase in income is associated with a 3.08% decrease in the odds of consenting. For residents with fair health, a one-thousand-dollar increase in income is associated with a 2.35% increase in the odds of consenting. For residents with poor health, a one-thousand-dollar increase in income is associated with a 5.46% increase in the odds of consenting. For residents who did not respond to the question of their health, a one-thousand-dollar increase in income is associated with a 2.05% increase in the odds of consenting. For residents who declined to give their health or did not know, a one-thousand-dollar increase in income is associated with a 4.75% decrease in the odds of consenting.
+
+Lastly, as compared to residents who gave different responses than those they live with, giving the same responses as those they live with is associated with a 180% increase in the odds of consenting, and living alone is associated with a 226% increase in the odds of consenting. 
+
+```{r echo=FALSE}
+confint(GoldaFit) %>% kbl(caption = "Golda Meir Campus Model 95% Confidence Intervals") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+Probably because of the small sample size, none of the variables have 95% confidence intervals that give an entirely positive or negative log odds of a certain response, meaning that the model could be very far off. Because the model has separation, some variables do not have 95% confidence intervals but this does not mean the odds of a certain response given those variables is certain.
+
+###DISCUSSION
+
+The utilization of these models in order to inform the strategy for reapproaching residents who declined to be tested for COVID-19 faces a number of limitations, some common to all the models and some unique. First off, the variables used in all of these models were chosen because in combination (out of all combinations of the available variables) they appeared to give the best diagnostic power in understanding what factors were most correlated with a certain response from a resident. That said, the absense of a variable from any of these models does not mean that it had no correlation with their response. Rather, I chose to create parsimonious models for ease of interpretation. Second, these models at best can only determine correlation, not causation. Therefore, I can provide my best interpretation of the reasons for the correlations, but that does not mean that these are the reasons that residents gave certain responses. Ultimately, the insights gained from these models could have no impact on a resident's response upon reapproaching them. In order to create more effective models in the future, it may be appropriate to randomly select a number of residents from each campus to survey their reasons for their responses. In effect, these models provide educated guesses for those reasons, while a survey may provide more actionable information. Third, it might be found in further examination that previous patterns of COVID-19 contraction among 2Life residents, if there has been any, has also had a large impact on who has consented to be tested. Lastly, as mentioned previously, these models have much stronger diagnostic power than prognostic power. If a similar strategy is to be used with regards to COVID-19 vaccinations, new models would have to be created. 
+
+####Brighton Campus
+
+The interpretation of the results of this model does not seem to be straight forward. The fact that residents who are retired have a low odds of consenting makes me think that many residents chose not to be tested because they rarely leave their room and/or interact with outsiders. It also seems that many residents who live with another resident decided that only one of them would be tested, perhaps with the assumption that if one of them catched COVID-19 then both will. However, beyond that it doesn't appear straightforward why primary language or any other terms in the model are significant. It is possible that primary language in this model is being used as a heuristic for birthplace, in which case maybe having been raised in an authoritarian country is associated with a low odds of consenting. 
+
+Compared to other models, the discrimination of this one is rather poor. Even if these patterns are real, there are clearly other important factors that this model is not taking into consideration. But following these interpretations, it might be easiest to persuade residents who live alone and are retired and/or don't own a car to be tested, as well as groups of residents who live with at least one other resident but only one of those residents consented to be tested. 
+
+####Coleman Campus
+
+The interpretation of the results of this model does not seem to be straight forward. For instance, the effect of birthplace on response does not seem to make much sense. However, like the previous model, is appears that many residents who live with another resident chose to only have one of those residents tested, and those residents not being tested made up a significant number of those who did not consent to be tested. This is especially true for younger residents and less frail residents. The relationship between frailty and income as well as health and income seems to reveal that residents who are the least frail and the most healthy have the lowest odds of consenting, especially as their income increases. 
+
+Compared to other models, the discrimination of this one is rather good. However, even if these patterns are real, there are clearly other important factors that this model is not taking into consideration. But following these interpretations, it might be easiest to persuade residents who live alone and are retired and/or don't own a car to be tested, as well as groups of residents who live with at least one other resident but only one of those residents consented to be tested. Furthermore, healthier and less frail residents likely feel that their risk is low, but could be reapproached accordingly.
+
+####Brown Family Campus
+
+It appears that the interaction between income and primary language in this model is possibly a heuristic for a resident's attitudes about the level of authoritarianism in their birthplace, since residents whose primary language is from a country that was authoritarian have a lower odds of consenting when they have a higher income. Similarly to the last two models, it seems like many residents gave different responses than those they live with assuming that if one contracts COVID-19 than they both will, and this was especially true for younger residents and residents with higher incomes. Lastly, it seems possible that older residents in very good health care more about knowing if they have COVID-19 than older residents with less good health, perhaps because the former tends to be more conscientious about their health.
+
+Compared to other models, the discrimination of this one is excellent. It is very likely that these patterns are real and significant. However, even if these patterns are real, there are clearly other important factors that this model is not taking into consideration. The recommendations from the previous models could also be followed here.
+
+####Shillman Campus
+
+This model is a bit more difficult to intepret than the others. It seems like residents generally have a higher odds of consenting the older they are, the more frail, or the worse their health, with residents with higher incomes also have a slightly higher odds of consenting. Considering the effect of working and owning a car, it appears that a resident who interacts more with others cares more about knowing whether they have COVID-19. Lastly, it appears like residents who live alone tend not to consent, whereas those who live with someone else tend to consent. Younger residents tend to have only one partner be tested (if they live with another resident), but living alone has a larger effect than age on declining to be tested.
+
+Compared to other models, the discrimination of this one is excellent. It is very likely that these patterns are real and significant. However, even if these patterns are real, there are clearly other important factors that this model is not taking into consideration. The recommendations from the previous models could also be followed here.
+
+####Golda Meir Campus
+
+This model is not as telling as the others. The effect of primary language and income does not seem to be similar to that on Brown Family Campus. Furthermore, the relationship between health, income, and response very weak. Most telling is that, like most other campuses, it appears that many residents who live with others chose to only have one resident tested, which makes up a large number of those who declined to be tested.
+
+Compared to other models, the discrimination of this one is rather poor. Even if these patterns are real, there are clearly other important factors that this model is not taking into consideration. The recommendations from the previous models could also be followed here.
+
+
+
+
