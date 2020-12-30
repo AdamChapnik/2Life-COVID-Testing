@@ -25,9 +25,13 @@ library(rtweet)
 library(ROCR)
 library(caTools) 
 library(caret)
-df <- read_csv("COVID_Survey.csv")
-health <- read_csv("Health_Frailty.csv")
+df <- read_csv("COVID_Survey.csv") ## ORIGINAL WITH APT COLUMN (HASHED) ##
+df$X1 <- NULL
+health <- read_csv("Health_Frailty.csv") ## ORIGINAL WITH APT COLUMN (HASHED) ##
+health$X1 <- NULL
 vehicles <- read_csv("Vehicles.csv")
+vehicles$X1 <- NULL
+vehicles$X5 <- NULL
 
 # rename columns
 df <- df %>% dplyr::rename(ID = "Household Member: Contact ID")
@@ -245,6 +249,13 @@ df$Race <- NULL
 df$Latino <- NULL
 df$Gender <- NULL
 df$Apt <- NULL
+
+write.csv(df, "2Life_Data.csv")
+```
+
+```{r}
+df <- read_csv("2Life_Data.csv")
+df$X1 <- NULL
 ```
 
 ```{r}
