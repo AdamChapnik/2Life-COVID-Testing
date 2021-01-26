@@ -5,4 +5,6 @@ This is an analysis of 2Life Communities resident demographic data in relation t
 - residents who demonstrate patterns of leaving their rooms often, such as those who work or own cars, have higher odds of consenting to be tested; and
 - younger residents who live with at least one other resident have a higher odds than older residents in similar living situations to have only one resident of the pair consent to be tested.
 
-Original datasets have been removed, and confidential information is not included, although the original code remains. The dataset 2Life_Data.csv contains all of the data necessary to run the code. The proper order of the code is COVID_Survey_Data&Exploration.Rmd, COVID_Models.Rmd, then Results&Discussion.Rmd. Results&Discussion.Rmd contains a summary and interpretation of the results of the analysis, as well as a discussion of implementation strategies.
+Original datasets have been removed, and confidential information is not included, although the original code remains. The dataset 2Life_Data.csv contains all of the data necessary to run the code. The proper order of the code is COVID_Survey_Data&Exploration.Rmd, COVID_Models.Rmd, then Results&Discussion.Rmd. 
+
+Results&Discussion.Rmd contains a complete summary and interpretation of the results of the analysis, as well as a discussion of implementation strategies, and was used as the official report.
